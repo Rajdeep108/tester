@@ -7,6 +7,7 @@ from langchain_core.documents import Document
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate
+import re
 
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -15,20 +16,14 @@ OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
 OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
 from data import content
- 
-# 1. Set metadata
-{
-    "filename": "3gpp_standard_v1.pdf",
-    "standard_name": "3GPP",
-    "standard_version": "v1",
-    "release_date": "2022-01-01"
-}
- 
-# 2. Initialize embeddings
-embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
-                      api_version=OPENAI_API_VERSION,
-                      azure_deployment="text-embedding-ada-002",
-                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
+
+# Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(
+    api_key=OPENAI_API_KEY,
+    api_version=OPENAI_API_VERSION,
+    azure_deployment="text-embedding-ada-002",
+    azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
+)
 
 def already_ingested(standard_name, standard_version, persist_dir):
     vectordb = Chroma(
@@ -36,7 +31,6 @@ def already_ingested(standard_name, standard_version, persist_dir):
         embedding_function=embeddings,
         persist_directory=persist_dir,
     )
-    # Query for any document with this metadata
     results = vectordb.get(
         where={
             "$and": [
@@ -47,22 +41,21 @@ def already_ingested(standard_name, standard_version, persist_dir):
     )
     return len(results['ids']) > 0
 
- 
-# 3. Ingestor: split, embed, and store in ChromaDB
 def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"):
     standard_name = metadata.get("standard_name")
     standard_version = metadata.get("standard_version")
+    
     if already_ingested(standard_name, standard_version, persist_dir):
         print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
         return
+    
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_text(raw_text)
     docs = []
-    # Use enumerate to get chunk index
+    
     for idx, chunk in enumerate(chunks):
-        # Copy metadata and add chunk_id
-        chunk_metadata = (metadata or {}).copy()
-        chunk_metadata['chunk_id'] = idx  # or f"{metadata['filename']}_chunk_{idx}" for uniqueness
+        chunk_metadata = metadata.copy()
+        chunk_metadata['chunk_id'] = idx
         docs.append(Document(page_content=chunk, metadata=chunk_metadata))
  
     vectordb = Chroma(
@@ -71,49 +64,246 @@ def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = r"C:\Us
         persist_directory=persist_dir,
     )
     vectordb.add_documents(docs)
-    print(f"✅ Ingested {len(docs)} chunks into ChromaDB")
+    print(f"✅ Ingested {len(docs)} chunks for {standard_name} {standard_version}")
 
- 
-# 4. Build RAG chain
+def detect_query_type(user_query: str) -> str:
+    """
+    Simple and reliable query type detection for our specific use cases
+    """
+    query_lower = user_query.lower()
+    
+    if any(word in query_lower for word in ["latest", "recent", "current", "newest"]):
+        return "latest_standard"
+    
+    elif any(word in query_lower for word in ["compare", "difference", "vs", "versus", "contrast"]):
+        return "compare_versions"
+    
+    elif any(word in query_lower for word in ["key change", "what's new", "what changed", "new feature", "added feature"]):
+        return "key_changes"
+    
+    elif any(word in query_lower for word in ["analyze", "analysis", "overview", "summary"]):
+        return "analyze_standard"
+    
+    else:
+        return "general_query"
+
+def extract_standard_info(user_query: str) -> dict:
+    """
+    Extract standard name and versions from query
+    """
+    # Simple pattern matching for common query formats
+    query_lower = user_query.lower()
+    
+    result = {"standard_name": None, "versions": []}
+    
+    # Look for 3GPP patterns
+    three_gpp_pattern = r'3gpp\s+(?:tr|ts|spec)?\s*[\d\.]+'
+    match = re.search(three_gpp_pattern, query_lower)
+    if match:
+        result["standard_name"] = match.group(0).upper()
+    
+    # Look for version numbers (v1.0, v2.1.0, version 3, etc.)
+    version_pattern = r'v(\d+\.\d+(?:\.\d+)?)|\bversion\s+(\d+(?:\.\d+)?)'
+    versions = re.findall(version_pattern, query_lower)
+    
+    for version in versions:
+        # Clean up the version string
+        clean_version = version[0] if version[0] else version[1]
+        if clean_version:
+            result["versions"].append(f"V{clean_version}")
+    
+    return result
+
+def get_available_standards(vectordb):
+    """Get list of all available standards and versions"""
+    all_data = vectordb.get()
+    standards = {}
+    
+    for metadata in all_data['metadatas']:
+        std_name = metadata.get('standard_name')
+        std_version = metadata.get('standard_version')
+        
+        if std_name and std_version:
+            if std_name not in standards:
+                standards[std_name] = []
+            if std_version not in standards[std_name]:
+                standards[std_name].append(std_version)
+    
+    # Sort versions (simple string sort - for better sorting you'd need version parsing)
+    for std_name in standards:
+        standards[std_name].sort(reverse=True)
+    
+    return standards
+
 def build_rag_chain(persist_dir: str = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"):
-    llm = AzureChatOpenAI(api_key=OPENAI_API_KEY,
-                      api_version=OPENAI_API_VERSION,
-                      azure_deployment=OPENAI_DEPLOYMENT,
-                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-                      temperature=0)
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
  
     vectordb = Chroma(
         collection_name="standards_collection",
         embedding_function=embeddings,
         persist_directory=persist_dir,
     )
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})  # cosine similarity
- 
-    system_prompt = (
-        "Answer the question using only the provided context. "
-        "If the answer is not in the context, say 'I don't know'.\n\nContext: {context}"
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
- 
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, combine_docs_chain)
- 
-# 5. Run test
+
+    # Different prompts for different query types
+    prompts = {
+        "latest_standard": ChatPromptTemplate.from_messages([
+            ("system", """You are a telecom standards expert. Analyze the LATEST version of the standard and provide:
+            1. Key features and capabilities
+            2. Important technical specifications
+            3. Comparison highlights vs previous versions (if context allows)
+            4. Implementation considerations
+            
+            Context: {context}"""),
+            ("human", "{input}")
+        ]),
+        
+        "compare_versions": ChatPromptTemplate.from_messages([
+            ("system", """You are a telecom standards expert comparing different versions. Provide:
+            1. Clear comparison between the specified versions
+            2. What changed/added/removed between versions
+            3. Technical implications of changes
+            4. Backward compatibility notes
+            
+            Context: {context}"""),
+            ("human", "{input}")
+        ]),
+        
+        "key_changes": ChatPromptTemplate.from_messages([
+            ("system", """You are a telecom standards expert analyzing changes. Focus on:
+            1. Key changes and new features in the specified version
+            2. Technical improvements and enhancements
+            3. Impact on implementations
+            4. Important notes for adopters
+            
+            Context: {context}"""),
+            ("human", "{input}")
+        ]),
+        
+        "analyze_standard": ChatPromptTemplate.from_messages([
+            ("system", """You are a telecom standards expert providing comprehensive analysis:
+            1. Overall architecture and design
+            2. Key technical components
+            3. Implementation requirements
+            4. Industry impact and use cases
+            
+            Context: {context}"""),
+            ("human", "{input}")
+        ]),
+        
+        "general_query": ChatPromptTemplate.from_messages([
+            ("system", """You are a telecom standards expert. Answer the question based on the context.
+            If you don't know, say so. Be technical and precise.
+            
+            Context: {context}"""),
+            ("human", "{input}")
+        ])
+    }
+
+    def create_chain_for_query(user_query: str):
+        query_type = detect_query_type(user_query)
+        std_info = extract_standard_info(user_query)
+        
+        print(f"🔍 Detected query type: {query_type}")
+        print(f"📋 Standard info: {std_info}")
+        
+        # Build filter based on query type
+        filter_conditions = {}
+        
+        if query_type == "latest_standard" and std_info["standard_name"]:
+            # Get latest version for this standard
+            available_standards = get_available_standards(vectordb)
+            if std_info["standard_name"] in available_standards:
+                latest_version = available_standards[std_info["standard_name"]][0]
+                filter_conditions = {
+                    "standard_name": std_info["standard_name"],
+                    "standard_version": latest_version
+                }
+        
+        elif std_info["standard_name"] and std_info["versions"]:
+            # Specific standard and version(s) requested
+            if len(std_info["versions"]) == 1:
+                filter_conditions = {
+                    "standard_name": std_info["standard_name"],
+                    "standard_version": std_info["versions"][0]
+                }
+            else:
+                # Multiple versions - we'll retrieve all and let LLM compare
+                filter_conditions = {
+                    "standard_name": std_info["standard_name"],
+                    "standard_version": {"$in": std_info["versions"]}
+                }
+        
+        elif std_info["standard_name"]:
+            # Only standard name specified
+            filter_conditions = {"standard_name": std_info["standard_name"]}
+        
+        # Create retriever with appropriate filtering
+        if filter_conditions:
+            retriever = vectordb.as_retriever(
+                search_kwargs={
+                    "k": 8,
+                    "filter": filter_conditions
+                }
+            )
+        else:
+            retriever = vectordb.as_retriever(search_kwargs={"k": 5})
+        
+        # Select appropriate prompt
+        prompt = prompts[query_type]
+        combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+        
+        return create_retrieval_chain(retriever, combine_docs_chain)
+    
+    return create_chain_for_query
+
+def query_standards(user_query: str, persist_dir: str = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"):
+    """Main function to handle standard queries"""
+    try:
+        chain_builder = build_rag_chain(persist_dir)
+        rag_chain = chain_builder(user_query)
+        result = rag_chain.invoke({"input": user_query})
+        return result["answer"]
+    except Exception as e:
+        return f"Error processing query: {str(e)}"
+
+# Test with your specific question types
 if __name__ == "__main__":
-    # Example extracted big text
-    # Ingest
+    # Ingest example data
     ingest_text(content, metadata={
-    "filename": "23700-67-100",
-    "standard_name": "3GPP TR 23.700-67",
-    "standard_version": "V1.0.0",
-    "release_date": "2022-01-01"
-})
+        "filename": "23700-67-100",
+        "standard_name": "3GPP TR 23.700-67",
+        "standard_version": "V1.0.0",
+        "release_date": "2022-01-01"
+    })
     
-    # # Query
-    # rag_chain = build_rag_chain()
-    # result = rag_chain.invoke({"input": "What is the solution proposed to evaluate the Renewable Energy Consumption ?"})
+    # Add another version for testing comparisons
+    ingest_text("Additional content for version 2.0.0 with new features and improvements", metadata={
+        "filename": "23700-67-200",
+        "standard_name": "3GPP TR 23.700-67",
+        "standard_version": "V2.0.0",
+        "release_date": "2023-06-15"
+    })
     
-    # print("\nAnswer:", result["answer"])
+    # Test the specific question types you mentioned
+    test_queries = [
+        "analyze latest standards for 3GPP",
+        "compare versions V1.0.0 and V2.0.0 of 3GPP TR 23.700-67",
+        "compare two versions of standard 3GPP TR 23.700-67",
+        "what are the key changes in 3GPP TR 23.700-67 version V2.0.0",
+        "what are additional features in version V2.0.0 of 3GPP TR 23.700-67"
+    ]
+    
+    print("🧪 Testing Specific Query Types:")
+    print("=" * 60)
+    
+    for query in test_queries:
+        print(f"\n❓ Query: {query}")
+        answer = query_standards(query)
+        print(f"📝 Answer: {answer}")
+        print("-" * 60)
