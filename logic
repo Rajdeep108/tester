@@ -35,7 +35,9 @@ const VALIDATION_STEPS = [
   // You can add more steps here!
 ];
 
-const ACCEPTED_TYPE = "application/msword"; // Only .doc
+const ACCEPTED_TYPES = ["application/msword", //.doc
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" // .docx
+];
 const SHAREPOINT_FOLDER_PATH = "C:\\Users\\342559\\NTT DATA North America\\GenAI CoE India - Standards";
 
 // --- OPTIONAL: Progress Bar ---
@@ -62,9 +64,11 @@ export default function DocumentUpload() {
   // --- File Validation ---
   const validateFile = (file: File): string | null => {
     if (
-      !(file.type === ACCEPTED_TYPE || file.name.toLowerCase().endsWith(".doc"))
+      !(ACCEPTED_TYPES.includes(file.type) 
+      || file.name.toLowerCase().endsWith(".doc")) 
+      || file.name.toLowerCase().endsWith(".docx"))
     ) {
-      return "Only .doc files are allowed.";
+      return "Only .doc or .docx files are allowed.";
     }
     if (file.size > 50 * 1024 * 1024) return "File must be less than 50MB.";
     return null;
@@ -290,7 +294,8 @@ export default function DocumentUpload() {
               Upload <span className="text-blue-500">.doc</span> Files
             </div>
             <div className="text-gray-500 mb-4 text-sm">
-              <span className="bg-blue-100 px-2 py-1 rounded text-blue-700 font-medium">.doc</span> only, up to <span className="font-semibold">50MB</span>
+              <span className="bg-blue-100 px-2 py-1 rounded text-blue-700 font-medium">.doc</span> or{" "}
+              <span> className="bg-blue-100 px-2 py-1 rounded text-blue-700 font-medium">.docx</span> up to <span className="font-semibold">50MB</span>
             </div>
             <button
               className="inline-flex items-center gap-2 border border-blue-600 bg-blue-500/10 text-blue-700 font-bold px-7 py-2 rounded-xl mt-2 hover:bg-blue-500 hover:text-white transition-all duration-200 shadow"
@@ -305,7 +310,7 @@ export default function DocumentUpload() {
             <input
               type="file"
               multiple
-              accept=".doc"
+              accept=".doc, .docx"
               ref={fileInputRef}
               className="hidden"
               onChange={handleFileChange}
