@@ -1,179 +1,29 @@
+import openai
 import os
 from dotenv import load_dotenv
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain_core.prompts import ChatPromptTemplate
 
-# -------------------------------
-# 0. Load environment variables
-# -------------------------------
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
-OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
-OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
-from data import content  # extracted text (string)
+openai.api_type = os.getenv("OPENAI_TYPE")
+openai.api_base = os.getenv("OPENAI_BASE")
+openai.api_version = os.getenv("OPENAI_VERSION")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_DEPLOYMENT_NAME = os.getenv("OPENAI_DEPLOYMENT")
 
-# -------------------------------
-# 1. Initialize embeddings
-# -------------------------------
-embeddings = AzureOpenAIEmbeddings(
-    api_key=OPENAI_API_KEY,
-    api_version=OPENAI_API_VERSION,
-    azure_deployment="text-embedding-ada-002",
-    azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
-)
 
-VECTORSTORE_DIR = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"]="crawler-insights"
+os.environ["LANGCHAIN_API_KEY"]="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"
 
-# -------------------------------
-# 2. Already ingested check
-# -------------------------------
-def already_ingested(standard_name, standard_version, persist_dir=VECTORSTORE_DIR):
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
+from langsmith.run_helpers import traceable 
+
+@traceable(run_type="llm")
+def chat_completion(user_prompt:str, system_instruction:str):
+    response = openai.ChatCompletion.create(
+        engine=OPENAI_DEPLOYMENT_NAME,
+        messages=[
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_prompt}
+        ]
     )
-    results = vectordb.get(
-        where={
-            "$and": [
-                {"standard_name": standard_name},
-                {"standard_version": standard_version}
-            ]
-        }
-    )
-    return len(results['ids']) > 0
-
-# -------------------------------
-# 3. Ingestor
-# -------------------------------
-def ingest_text(raw_text: str, metadata: dict, persist_dir: str = VECTORSTORE_DIR):
-    standard_name = metadata.get("standard_name")
-    standard_version = metadata.get("standard_version")
-
-    if already_ingested(standard_name, standard_version, persist_dir):
-        print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
-        return
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(raw_text)
-
-    docs = []
-    for idx, chunk in enumerate(chunks):
-        chunk_metadata = metadata.copy()
-        chunk_metadata["chunk_id"] = idx
-        docs.append(Document(page_content=chunk, metadata=chunk_metadata))
-
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    vectordb.add_documents(docs)
-    vectordb.persist()
-    print(f"✅ Ingested {len(docs)} chunks into ChromaDB")
-
-# -------------------------------
-# 4. General RAG chain
-# -------------------------------
-def build_rag_chain(persist_dir: str = VECTORSTORE_DIR):
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
-    )
-
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
-
-    system_prompt = (
-        "Answer the question using only the provided context. "
-        "If the answer is not in the context, say 'I don't know'.\n\nContext: {context}"
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, combine_docs_chain)
-
-# -------------------------------
-# 5. Latest version retriever
-# -------------------------------
-def get_latest_retriever(standard_name: str, persist_dir: str = VECTORSTORE_DIR):
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    results = vectordb.get(where={"standard_name": standard_name})
-    if not results["ids"]:
-        raise ValueError(f"No documents found for standard '{standard_name}'")
-
-    latest_metadata = max(results["metadatas"], key=lambda m: m["release_date"])
-    print(f"📌 Latest version for {standard_name}: {latest_metadata['standard_version']} ({latest_metadata['release_date']})")
-
-    return vectordb.as_retriever(
-        search_kwargs={"k": 3},
-        filter={
-            "standard_name": latest_metadata["standard_name"],
-            "standard_version": latest_metadata["standard_version"]
-        }
-    )
-
-# -------------------------------
-# 6. Analyze latest chain
-# -------------------------------
-def analyze_latest_standard(standard_name: str, user_query: str):
-    retriever = get_latest_retriever(standard_name)
-
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
-    )
-
-    system_prompt = (
-        "You are analyzing the latest version of the given telecom standard. "
-        "Summarize its purpose, key features, and scope based only on the provided context.\n\nContext: {context}"
-    )
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
-
-    return rag_chain.invoke({"input": user_query})["answer"]
-
-# -------------------------------
-# 7. Run test
-# -------------------------------
-if __name__ == "__main__":
-    # Example ingestion (replace content + metadata with actual extracted text)
-    ingest_text(content, metadata={
-        "filename": "23700-67-100",
-        "standard_name": "3GPP TR 23.700-67",
-        "standard_version": "V1.0.0",
-        "release_date": "2022-01-01"
-    })
-
-    # Query for "analyze latest"
-    result = analyze_latest_standard("3GPP TR 23.700-67", "Analyze the latest 3GPP TR 23.700-67 standard")
-    print("\nAnswer:\n", result)
+    return response.choices[0].message.content.strip()
