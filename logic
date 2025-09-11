@@ -1,29 +1,44 @@
-import openai
 import os
 from dotenv import load_dotenv
+from openai import AzureOpenAI
+from langsmith.run_helpers import traceable
 
+# Load environment variables
 load_dotenv()
 
-openai.api_type = os.getenv("OPENAI_TYPE")
-openai.api_base = os.getenv("OPENAI_BASE")
-openai.api_version = os.getenv("OPENAI_VERSION")
-openai.api_key = os.getenv("OPENAI_API_KEY")
-OPENAI_DEPLOYMENT_NAME = os.getenv("OPENAI_DEPLOYMENT")
+# Environment vars (all required)
+AZURE_ENDPOINT = os.getenv("OPENAI_BASE")              # e.g. https://<your-resource>.openai.azure.com/
+AZURE_API_KEY = os.getenv("OPENAI_API_KEY")
+AZURE_API_VERSION = os.getenv("OPENAI_VERSION")        # e.g. "2023-12-01-preview"
+AZURE_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")      # your deployment name in Azure
 
-
+# LangSmith tracing (optional)
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_PROJECT"]="crawler-insights"
-os.environ["LANGCHAIN_API_KEY"]=""
+os.environ["LANGCHAIN_PROJECT"] = "crawler-insights"
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
 
-from langsmith.run_helpers import traceable 
+# Azure client
+client = AzureOpenAI(
+    api_key=AZURE_API_KEY,
+    azure_endpoint=AZURE_ENDPOINT,
+    api_version=AZURE_API_VERSION,
+)
 
 @traceable(run_type="llm")
-def chat_completion(user_prompt:str, system_instruction:str):
-    response = openai.ChatCompletion.create(
-        engine=OPENAI_DEPLOYMENT_NAME,
+def chat_completion(user_prompt: str, system_instruction: str) -> str:
+    response = client.chat.completions.create(
+        model=AZURE_DEPLOYMENT,   # deployment name, not model ID
         messages=[
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_prompt}
-        ]
+            {"role": "user", "content": user_prompt},
+        ],
     )
     return response.choices[0].message.content.strip()
+
+
+if __name__ == "__main__":
+    reply = chat_completion(
+        "Hello, can you summarize Azure OpenAI migration steps?",
+        "You are a helpful assistant."
+    )
+    print(reply)
