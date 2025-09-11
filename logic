@@ -13,7 +13,7 @@ OPENAI_DEPLOYMENT_NAME = os.getenv("OPENAI_DEPLOYMENT")
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_PROJECT"]="crawler-insights"
-os.environ["LANGCHAIN_API_KEY"]="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"
+os.environ["LANGCHAIN_API_KEY"]=""
 
 from langsmith.run_helpers import traceable 
 
