@@ -1,9 +1,132 @@
-if (
-  !(
-    ACCEPTED_TYPES.includes(file.type) ||
-    file.name.toLowerCase().endsWith(".doc") ||
-    file.name.toLowerCase().endsWith(".docx")
-  )
-) {
-  return "Only .doc or .docx files are allowed.";
-}
+from fastapi import APIRouter, File, UploadFile, HTTPException
+from pydantic import BaseModel
+from typing import List
+import os
+import shutil
+from docx import Document  # for .docx parsing
+
+router = APIRouter()
+
+# --- Folder paths ---
+UPLOAD_DIR = "temp/uploads"
+VALIDATED_DIR = "Validated_docs"
+SHAREPOINT_DIR = r"C:\Users\342534\NTT DATA North America\GenAI CoE India - Standards"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(VALIDATED_DIR, exist_ok=True)
+os.makedirs(SHAREPOINT_DIR, exist_ok=True)
+
+# --- Validation ---
+REQUIRED_KEYWORDS = ["3GPP", "Version"]
+
+
+def read_docx(file_path: str) -> str:
+    """Extract text from .docx file."""
+    doc = Document(file_path)
+    return "\n".join([para.text for para in doc.paragraphs])
+
+
+def read_doc(file_path: str) -> str:
+    """Fallback: Try to decode .doc as plain text (not reliable for all cases)."""
+    with open(file_path, "rb") as f:
+        return f.read().decode(errors="ignore")
+
+
+def validate_document(file_path: str) -> (bool, str):  # type: ignore
+    try:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".docx":
+            content = read_docx(file_path)
+        elif ext == ".doc":
+            content = read_doc(file_path)  # limited parsing
+        else:
+            return False, "Unsupported file format."
+
+        for kw in REQUIRED_KEYWORDS:
+            if kw.lower() not in content.lower():
+                return False, f"File rejected: Missing required keyword '{kw}'."
+        return True, "Document meets all validation criteria."
+    except Exception as e:
+        return False, f"File rejected: Could not read file. {str(e)}"
+
+
+# --- Upload Endpoint ---
+@router.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".doc", ".docx"]:
+        raise HTTPException(status_code=400, detail="File rejected: Only .doc or .docx files are allowed.")
+
+    file_location = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {
+        "filename": file.filename,
+        "message": "Uploaded successfully!"
+    }
+
+
+# --- Validation Endpoint ---
+class ValidateRequest(BaseModel):
+    filename: str
+
+
+@router.post("/api/validate")
+def validate_file(req: ValidateRequest):
+    file_location = os.path.join(UPLOAD_DIR, req.filename)
+    if not os.path.isfile(file_location):
+        return {"is_valid": False, "validation_message": "Not Found"}
+
+    is_valid, validation_message = validate_document(file_location)
+
+    if is_valid:
+        validated_location = os.path.join(VALIDATED_DIR, req.filename)
+        shutil.move(file_location, validated_location)
+        return {
+            "is_valid": True,
+            "validation_message": validation_message,
+            "validated_location": validated_location,
+        }
+    else:
+        return {"is_valid": False, "validation_message": validation_message}
+
+
+# --- SharePoint Sync Endpoint ---
+class SyncRequest(BaseModel):
+    filenames: List[str]
+
+
+@router.post("/api/sharepoint-sync")
+def sharepoint_sync(req: SyncRequest):
+    moved_files = []
+    errors = []
+    for filename in req.filenames:
+        validated_location = os.path.join(VALIDATED_DIR, filename)
+        sharepoint_location = os.path.join(SHAREPOINT_DIR, filename)
+        if not os.path.isfile(validated_location):
+            errors.append(f"{filename} not found in validated docs.")
+            continue
+        try:
+            shutil.move(validated_location, sharepoint_location)
+            moved_files.append(filename)
+        except Exception as e:
+            errors.append(f"{filename}: {str(e)}")
+
+    if errors and not moved_files:
+        return {"message": "No files synced.", "errors": errors}
+    elif errors:
+        return {"message": "Some files synced.", "synced": moved_files, "errors": errors}
+    else:
+        return {"message": "Synced successfully to SharePoint!", "synced": moved_files}
+
+
+# --- List Endpoints ---
+@router.get("/api/list-validated")
+def list_validated():
+    return {"files": os.listdir(VALIDATED_DIR)}
+
+
+@router.get("/api/list-sharepoint")
+def list_sharepoint():
+    return {"files": os.listdir(SHAREPOINT_DIR)}
