@@ -1,44 +1,105 @@
+from fastapi import APIRouter, File, UploadFile, HTTPException
+from pydantic import BaseModel
+from typing import List
 import os
-from dotenv import load_dotenv
-from openai import AzureOpenAI
-from langsmith.run_helpers import traceable
+import shutil
 
-# Load environment variables
-load_dotenv()
+router = APIRouter()
 
-# Environment vars (all required)
-AZURE_ENDPOINT = os.getenv("OPENAI_BASE")              # e.g. https://<your-resource>.openai.azure.com/
-AZURE_API_KEY = os.getenv("OPENAI_API_KEY")
-AZURE_API_VERSION = os.getenv("OPENAI_VERSION")        # e.g. "2023-12-01-preview"
-AZURE_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")      # your deployment name in Azure
+# --- Folder paths ---
+UPLOAD_DIR = "temp/uploads"
+VALIDATED_DIR = "Validated_docs"
+SHAREPOINT_DIR = r"C:\Users\342534\NTT DATA North America\GenAI CoE India - Standards"
 
-# LangSmith tracing (optional)
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_PROJECT"] = "crawler-insights"
-os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY", "")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(VALIDATED_DIR, exist_ok=True)
+os.makedirs(SHAREPOINT_DIR, exist_ok=True)
 
-# Azure client
-client = AzureOpenAI(
-    api_key=AZURE_API_KEY,
-    azure_endpoint=AZURE_ENDPOINT,
-    api_version=AZURE_API_VERSION,
-)
+# --- Validation ---
+REQUIRED_KEYWORDS = ["3GPP", "Version"]
 
-@traceable(run_type="llm")
-def chat_completion(user_prompt: str, system_instruction: str) -> str:
-    response = client.chat.completions.create(
-        model=AZURE_DEPLOYMENT,   # deployment name, not model ID
-        messages=[
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    return response.choices[0].message.content.strip()
+def validate_document(file_path: str) -> (bool, str): # type: ignore
+    try:
+        with open(file_path, "rb") as f:
+            content = f.read().decode(errors='ignore')
+            for kw in REQUIRED_KEYWORDS:
+                if kw.lower() not in content.lower():
+                    return False, f"File rejected: Missing required keyword '{kw}'."
+            return True, "Document meets all validation criteria."
+    except Exception as e:
+        return False, f"File rejected: Could not read file. {str(e)}"
 
+# --- Upload Endpoint ---
+@router.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext != ".doc":
+        raise HTTPException(status_code=400, detail="File rejected: Only .doc files are allowed.")
+    file_location = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    return {
+        "filename": file.filename,
+        "message": "Uploaded successfully!"
+    }
 
-if __name__ == "__main__":
-    reply = chat_completion(
-        "Hello, can you summarize Azure OpenAI migration steps?",
-        "You are a helpful assistant."
-    )
-    print(reply)
+# --- Validation Endpoint ---
+class ValidateRequest(BaseModel):
+    filename: str
+
+@router.post("/api/validate")
+def validate_file(req: ValidateRequest):
+    file_location = os.path.join(UPLOAD_DIR, req.filename)
+    if not os.path.isfile(file_location):
+        return {
+            "is_valid": False,
+            "validation_message": "Not Found"
+        }
+    is_valid, validation_message = validate_document(file_location)
+    if is_valid:
+        validated_location = os.path.join(VALIDATED_DIR, req.filename)
+        shutil.move(file_location, validated_location)
+        return {
+            "is_valid": True,
+            "validation_message": validation_message,
+            "validated_location": validated_location
+        }
+    else:
+        return {
+            "is_valid": False,
+            "validation_message": validation_message
+        }
+
+# --- SharePoint Sync Endpoint ---
+class SyncRequest(BaseModel):
+    filenames: List[str]
+
+@router.post("/api/sharepoint-sync")
+def sharepoint_sync(req: SyncRequest):
+    moved_files = []
+    errors = []
+    for filename in req.filenames:
+        validated_location = os.path.join(VALIDATED_DIR, filename)
+        sharepoint_location = os.path.join(SHAREPOINT_DIR, filename)
+        if not os.path.isfile(validated_location):
+            errors.append(f"{filename} not found in validated docs.")
+            continue
+        try:
+            shutil.move(validated_location, sharepoint_location)
+            moved_files.append(filename)
+        except Exception as e:
+            errors.append(f"{filename}: {str(e)}")
+    if errors and not moved_files:
+        return {"message": "No files synced.", "errors": errors}
+    elif errors:
+        return {"message": f"Some files synced. Errors: {errors}", "synced": moved_files, "errors": errors}
+    else:
+        return {"message": "Synced successfully to SharePoint!", "synced": moved_files}
+
+@router.get("/api/list-validated")
+def list_validated():
+    return {"files": os.listdir(VALIDATED_DIR)}
+
+@router.get("/api/list-sharepoint")
+def list_sharepoint():
+    return {"files": os.listdir(SHAREPOINT_DIR)}
