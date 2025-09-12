@@ -1,52 +1,103 @@
-@router.post("/api/validate")
-def validate_file(req: ValidateRequest):
-    file_location = os.path.join(UPLOAD_DIR, req.filename)
-    if not os.path.isfile(file_location):
-        return {"is_valid": False, "validation_message": "Not Found"}
+const validateAndIngestFile = async (file: File) => {
+  // --- Step 1: Validate ---
+  setFiles(prev =>
+    prev.map(f =>
+      f.file === file
+        ? {
+            ...f,
+            validationStatus: "validating",
+            validationMessage: "Checking keywords & structure...",
+            validationStep: 1,
+          }
+        : f
+    )
+  );
 
-    is_valid, validation_message = validate_document(file_location)
+  try {
+    const validateRes = await axios.post(
+      "http://localhost:8000/api/validate",
+      { filename: file.name },
+      { headers: { "Content-Type": "application/json" } }
+    );
 
-    if not is_valid:
-        return {"is_valid": False, "validation_message": validation_message}
-
-    # Move to validated folder
-    validated_location = os.path.join(VALIDATED_DIR, req.filename)
-    shutil.move(file_location, validated_location)
-
-    # Extract metadata
-    ext = os.path.splitext(validated_location)[1].lower()
-    content = read_docx(validated_location) if ext == ".docx" else read_doc(validated_location)
-    standard_match = STANDARD_REGEX.search(content)
-    standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
-    version_match = VERSION_REGEX.search(content)
-    version = version_match.group(0).upper() if version_match else "V0.0.0"
-    metadata = {"filename": req.filename, "standard_name": standard_name, "standard_version": version}
-
-    return {
-        "is_valid": True,
-        "validation_message": validation_message,
-        "validated_location": validated_location,
-        "metadata": metadata
+    if (!validateRes.data.is_valid) {
+      setFiles(prev =>
+        prev.map(f =>
+          f.file === file
+            ? {
+                ...f,
+                validationStatus: "error",
+                validationMessage: validateRes.data.validation_message,
+                validationStep: 2,
+              }
+            : f
+        )
+      );
+      return;
     }
 
-# --- Ingest Only ---
-class IngestRequest(BaseModel):
-    filename: str
-    metadata: dict
+    // --- Step 2: Ingest ---
+    setFiles(prev =>
+      prev.map(f =>
+        f.file === file
+          ? {
+              ...f,
+              validationStatus: "success",
+              validationMessage: validateRes.data.validation_message,
+              validationStep: 2, // completed validation
+              ingestionStatus: "idle",
+            }
+          : f
+      )
+    );
 
-@router.post("/api/ingest")
-def ingest_file(req: IngestRequest):
-    validated_location = os.path.join(VALIDATED_DIR, req.filename)
-    if not os.path.isfile(validated_location):
-        return {"ingested": False, "message": "Validated file not found."}
+    setFiles(prev =>
+      prev.map(f =>
+        f.file === file
+          ? { ...f, ingestionStatus: "idle" } // reset ingestion spinner
+          : f
+      )
+    );
 
-    ext = os.path.splitext(validated_location)[1].lower()
-    content = read_docx(validated_location) if ext == ".docx" else read_doc(validated_location)
+    setFiles(prev =>
+      prev.map(f =>
+        f.file === file
+          ? { ...f, ingestionStatus: "validating", validationStep: 3, validationMessage: "Ingesting..." }
+          : f
+      )
+    );
 
-    try:
-        if already_ingested(req.metadata["standard_name"], req.metadata["standard_version"], persist_dir=PATH_TO_VECTORSTORE):
-            return {"ingested": False, "message": "Already in vector DB (skipped)."}
-        ingest_text(content, metadata=req.metadata)
-        return {"ingested": True, "message": "Ingested successfully."}
-    except Exception as e:
-        return {"ingested": False, "message": f"Ingestion error: {str(e)}"}
+    const ingestRes = await axios.post(
+      "http://localhost:8000/api/ingest",
+      { filename: file.name, metadata: validateRes.data.metadata },
+      { headers: { "Content-Type": "application/json" } }
+    );
+
+    setFiles(prev =>
+      prev.map(f =>
+        f.file === file
+          ? {
+              ...f,
+              ingestionStatus: ingestRes.data.ingested ? "success" : "skipped",
+              validationStep: 4,
+              validationMessage: `${validateRes.data.validation_message} | ${ingestRes.data.message}`,
+            }
+          : f
+      )
+    );
+  } catch (err: any) {
+    setFiles(prev =>
+      prev.map(f =>
+        f.file === file
+          ? {
+              ...f,
+              validationStatus: "error",
+              ingestionStatus: "skipped",
+              validationMessage: err.response?.data?.detail || err.message || "Validation/Ingestion failed",
+              validationStep: 2,
+            }
+          : f
+      )
+    );
+  }
+};
