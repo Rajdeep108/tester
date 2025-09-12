@@ -1,34 +1,85 @@
-const VALIDATION_STEPS = [
-  { key: 1, label: "Checking keywords" },
-  { key: 2, label: "Checking document structure" },
-  { key: 3, label: "Ingesting into Vector DB" }, // ✅ new
-];
+interface FileRecord {
+  ...
+  ingestionStatus?: "idle" | "processing" | "success" | "skipped" | "error";
+  ingestionMessage?: string;
+}
 
-for (let i = 0; i < VALIDATION_STEPS.length - 1; i++) {
+
+try {
+  // --- VALIDATION ---
   setFiles((prev) =>
     prev.map((f) =>
       f.file === file
         ? {
             ...f,
             validationStatus: "validating",
-            validationMessage: VALIDATION_STEPS[i].label + "...",
-            validationStep: i + 2,
+            validationMessage: "Validating document...",
           }
         : f
     )
   );
-  await new Promise((res) => setTimeout(res, 1000));
+
+  const res = await axios.post(
+    "http://localhost:8000/api/validate",
+    { filename: file.name },
+    { headers: { "Content-Type": "application/json" } }
+  );
+
+  setFiles((prev) =>
+    prev.map((f) =>
+      f.file === file
+        ? {
+            ...f,
+            validationStatus: res.data.is_valid ? "success" : "error",
+            validationMessage: res.data.validation_message,
+            ingestionStatus: res.data.is_valid ? "processing" : "idle",
+            ingestionMessage: res.data.is_valid
+              ? "Ingesting into Vector DB..."
+              : "",
+          }
+        : f
+    )
+  );
+
+  // --- INGESTION ---
+  if (res.data.is_valid) {
+    setTimeout(() => {
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.file === file
+            ? {
+                ...f,
+                ingestionStatus: res.data.ingested ? "success" : "skipped",
+                ingestionMessage: res.data.ingested
+                  ? "Ingested into Vector DB"
+                  : "Already exists in Vector DB (skipped)",
+              }
+            : f
+        )
+      );
+    }, 1200); // fake delay for smooth UI
+  }
+} catch (err: any) {
+  ...
 }
 
-setFiles((prev) =>
-  prev.map((f) =>
-    f.file === file
-      ? {
-          ...f,
-          validationStatus: "validating",
-          validationMessage: VALIDATION_STEPS[VALIDATION_STEPS.length - 1].label + "...",
-          validationStep: VALIDATION_STEPS.length + 1,
-        }
-      : f
-  )
-);
+
+
+{item.ingestionStatus === "processing" && (
+  <li className="flex items-center gap-2 text-blue-600 text-sm font-medium animate-pulse">
+    <Loader2 className="w-4 h-4 animate-spin" />
+    {item.ingestionMessage}
+  </li>
+)}
+
+{item.ingestionStatus === "success" && (
+  <li className="flex items-center gap-2 text-green-600 text-sm font-medium">
+    <CheckCircle className="w-4 h-4" /> {item.ingestionMessage}
+  </li>
+)}
+
+{item.ingestionStatus === "skipped" && (
+  <li className="flex items-center gap-2 text-gray-600 text-sm font-medium">
+    <AlertTriangle className="w-4 h-4" /> {item.ingestionMessage}
+  </li>
+)}
