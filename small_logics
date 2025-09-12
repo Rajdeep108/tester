@@ -1,78 +1,16 @@
-STANDARD_NAME_REGEX = re.compile(r"\b3GPP\s+(TR|TS)\s+[\d\.]+\b", re.IGNORECASE)
-DATE_REGEX = re.compile(r"\b[Vv]\s*\d+(?:\.\d+){1,3}\b\s*\((\d{4}-\d{2})\)")
-
-def validate_file(req: ValidateRequest):
-    file_location = os.path.join(UPLOAD_DIR, req.filename)
-    if not os.path.isfile(file_location):
-        return {"is_valid": False, "validation_message": "Not Found"}
-
-    is_valid, validation_message = validate_document(file_location)
-
-    if is_valid:
-        validated_location = os.path.join(VALIDATED_DIR, req.filename)
-        shutil.move(file_location, validated_location)
-
-        # --- Extract content for ingestion ---
-        ext = os.path.splitext(validated_location)[1].lower()
-        if ext == ".docx":
-            content = read_docx(validated_location)
-        elif ext == ".doc":
-            content = read_doc(validated_location)
-        else:
-            content = ""
-
-        # --- Extract metadata ---
-        standard_match = STANDARD_NAME_REGEX.search(content)
-        standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
-
-        version_date_match = VERSION_DATE_REGEX.search(content)
-        if version_date_match:
-            version = version_date_match.group(0).split()[0].upper()  # e.g., "V1.0.3"
-            release_date = version_date_match.group(1) + "-01"        # expand YYYY-MM → YYYY-MM-01
-        else:
-            # fallback: just version without date
-            version_match = VERSION_REGEX.search(content)
-            version = version_match.group(0).upper() if version_match else "V0.0.0"
-            release_date = None
-
-        metadata = {
-            "filename": req.filename,
-            "standard_name": standard_name,
-            "standard_version": version,
-            "release_date": release_date
-        }
-
-        # --- Check and Ingest into Vector DB ---
-        try:
-            if already_ingested(standard_name, version, persist_dir=PATH_TO_VECTORSTORE):
-                return {
-                    "is_valid": True,
-                    "validation_message": validation_message,
-                    "validated_location": validated_location,
-                    "ingested": False,
-                    "metadata": metadata,
-                    "message": f"⚠️ Standard '{standard_name}' version '{version}' already exists in vector DB"
-                }
-            else:
-                ingest_text(content, metadata=metadata)
-                return {
-                    "is_valid": True,
-                    "validation_message": validation_message,
-                    "validated_location": validated_location,
-                    "ingested": True,
-                    "metadata": metadata,
-                    "message": "✅ Ingested successfully into vector DB"
-                }
-        except Exception as e:
-            print(f"Error ingesting file: {e}")
-            return {
-                "is_valid": True,
-                "validation_message": validation_message,
-                "validated_location": validated_location,
-                "ingested": False,
-                "metadata": metadata,
-                "message": f"❌ Error ingesting: {str(e)}"
-            }
-
-    else:
-        return {"is_valid": False, "validation_message": validation_message}
+setFiles((prev) =>
+        prev.map((f) =>
+          f.file === file
+            ? {
+                ...f,
+                validationStatus: res.data.is_valid ? "success" : "error",
+                validationMessage: res.data.validation_message,
+                validationStep: VALIDATION_STEPS.length + 2,
+                ingestionStatus: res.data.ingested
+                  ? "success"
+                  ? "skipped",
+              }
+            : f
+        )
+      );
+    } catch (err
