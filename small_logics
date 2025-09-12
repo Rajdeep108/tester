@@ -1,4 +1,5 @@
 STANDARD_NAME_REGEX = re.compile(r"\b3GPP\s+(TR|TS)\s+[\d\.]+\b", re.IGNORECASE)
+DATE_REGEX = re.compile(r"\b[Vv]\s*\d+(?:\.\d+){1,3}\b\s*\((\d{4}-\d{2})\)")
 
 def validate_file(req: ValidateRequest):
     file_location = os.path.join(UPLOAD_DIR, req.filename)
@@ -24,14 +25,21 @@ def validate_file(req: ValidateRequest):
         standard_match = STANDARD_NAME_REGEX.search(content)
         standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
 
-        version_match = VERSION_REGEX.search(content)
-        version = version_match.group(0).upper() if version_match else "V0.0.0"
+        version_date_match = VERSION_DATE_REGEX.search(content)
+        if version_date_match:
+            version = version_date_match.group(0).split()[0].upper()  # e.g., "V1.0.3"
+            release_date = version_date_match.group(1) + "-01"        # expand YYYY-MM → YYYY-MM-01
+        else:
+            # fallback: just version without date
+            version_match = VERSION_REGEX.search(content)
+            version = version_match.group(0).upper() if version_match else "V0.0.0"
+            release_date = None
 
         metadata = {
             "filename": req.filename,
             "standard_name": standard_name,
             "standard_version": version,
-            "release_date": datetime.date.today().isoformat()
+            "release_date": release_date
         }
 
         # --- Check and Ingest into Vector DB ---
