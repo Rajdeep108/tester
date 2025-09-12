@@ -40,3 +40,142 @@ async def chat_history():
         )
         for row in rows
     ]
+
+
+
+
+
+
+
+
+
+import os
+from dotenv import load_dotenv
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.prompts import ChatPromptTemplate
+
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
+
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
+
+INTENTS = {
+    "analyze_latest": "Please analyze the latest standards for me",
+    "compare_versions": "Please compare versions of a standard",
+    "compare_standards": "Please compare two different standards",
+    "compare_standard_versions": "Please compare a standard across two versions",
+    "explain_features": "Explain the features of a standard",
+    "latest_standard": "Which is the latest standard/version",
+}
+ 
+# 1. Set metadata
+{
+    "filename": "3gpp_standard_v1.pdf",
+    "standard_name": "3GPP",
+    "standard_version": "v1",
+    "release_date": "2022-01-01"
+}
+ 
+# 2. Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment="text-embedding-ada-002",
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
+
+
+# take these two into doc uploader----------------------------------------------------------------------------------
+def already_ingested(standard_name, standard_version, persist_dir):
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    # Query for any document with this metadata
+    results = vectordb.get(
+        where={
+            "$and": [
+                {"standard_name": standard_name},
+                {"standard_version": standard_version}
+            ]
+        }
+    )
+    return len(results['ids']) > 0
+
+ 
+# 3. Ingestor: split, embed, and store in ChromaDB
+def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
+    standard_name = metadata.get("standard_name")
+    standard_version = metadata.get("standard_version")
+    if already_ingested(standard_name, standard_version, persist_dir):
+        print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
+        return
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_text(raw_text)
+    docs = []
+    # Use enumerate to get chunk index
+    for idx, chunk in enumerate(chunks):
+        # Copy metadata and add chunk_id
+        chunk_metadata = (metadata or {}).copy()
+        chunk_metadata['chunk_id'] = idx  # or f"{metadata['filename']}_chunk_{idx}" for uniqueness
+        docs.append(Document(page_content=chunk, metadata=chunk_metadata))
+ 
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    vectordb.add_documents(docs)
+    print(f"✅ Ingested {len(docs)} chunks into ChromaDB. Metadata : {chunk_metadata}")
+
+# ------------------------------------------------------------------------------------------------------------------------
+
+# 4. Build RAG chain
+def build_rag_chain(persist_dir: str = PATH_TO_VECTORSTORE):
+    llm = AzureChatOpenAI(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment=OPENAI_DEPLOYMENT,
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+                      temperature=0)
+ 
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})  # cosine similarity
+ 
+    system_prompt = (
+    "You are a helpful AI assistant specialized in telecom standards (3GPP and related). "
+    "When the user asks about telecom or standards, use the provided context to answer. "
+    "If the answer is not in the context, but it's still about telecom, say 'I don't know'. "
+    "If the question is general chit-chat or not related to telecom, answer naturally using your own knowledge.\n\n"
+    "Context: {context}"
+)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ])
+ 
+    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+    return create_retrieval_chain(retriever, combine_docs_chain)
+ 
+# ------------------------
+#EXAMPLE of Metadata.....|
+# ------------------------
+'''
+ingest_text("the extracted standards doc file.....", metadata={
+    "filename": "23700-67-100",
+    "standard_name": "3GPP TR 23.700-67",
+    "standard_version": "V1.0.0",
+    "release_date": "2022-01-01"
+})
+'''
