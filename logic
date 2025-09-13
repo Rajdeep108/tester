@@ -1,28 +1,72 @@
-from test import build_intent_classifier, build_entity_extractor, get_full_docs
+# relevant imports
+import json
+from fastapi import HTTPException
+from yest import build_intent_classifier, build_entity_extractor, get_full_docs
 from agents.utils.rag_pipeline import build_rag_chain
+from utils.functions import insert_chat_history
 
+# init (do once)
 intent_classifier = build_intent_classifier()
 entity_extractor = build_entity_extractor()
 rag_chain = build_rag_chain()
 
 @router.post("/chat/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    """
-    Handle user chat, use intent classification,
-    fallback to RAG if intent is none.
-    """
     try:
-        intent_response = intent_classifier.invoke({"query": request.question})
-        intent = intent_response.content.strip().lower()
+        # 1) classify intent
+        intent_resp = intent_classifier.invoke({"query": request.question})
+        intent = getattr(intent_resp, "content", "none").strip().lower()
 
+        # 2) if none -> quick RAG fallback
         if intent == "none":
-            # fallback → normal RAG
             result = rag_chain.invoke({"input": request.question})
             answer = result["answer"]
-        else:
-            # for now, just echo intent (expand later with entities + docs)
-            answer = f"Intent detected: {intent}"
+            insert_chat_history(request.question, answer, request.session_id)
+            return ChatResponse(answer=answer)
 
+        # 3) extract entities (may contain lists)
+        ent_resp = entity_extractor.invoke({"query": request.question})
+        try:
+            entities = json.loads(ent_resp.content)
+        except Exception:
+            entities = {"standard_names": [], "standard_versions": [], "release_date": None}
+
+        standard_names = entities.get("standard_names", []) or []
+        standard_versions = entities.get("standard_versions", []) or []
+
+        # 4) build filters and collect all docs for each filter via get_full_docs
+        all_docs = []  # list of (doc_text, metadata)
+        if standard_names:
+            for i, name in enumerate(standard_names):
+                filters = {"standard_name": name}
+                if i < len(standard_versions) and standard_versions[i]:
+                    filters["standard_version"] = standard_versions[i]
+                docs = get_full_docs(filters)
+                all_docs.extend(docs)
+        elif standard_versions:
+            for v in standard_versions:
+                filters = {"standard_version": v}
+                docs = get_full_docs(filters)
+                all_docs.extend(docs)
+
+        # 5) if no docs found -> fallback to RAG
+        if not all_docs:
+            result = rag_chain.invoke({"input": request.question})
+            answer = result["answer"]
+            insert_chat_history(request.question, answer, request.session_id)
+            return ChatResponse(answer=answer)
+
+        # 6) build context from retrieved docs (limit chunks to avoid huge payload)
+        MAX_CHUNKS = 20
+        selected = all_docs[:MAX_CHUNKS]
+        context = "\n\n".join([doc for doc, _meta in selected])
+
+        # 7) ask RAG with structured prompt + context
+        prompt_input = f"Intent: {intent}\n\nQuery: {request.question}\n\nContext:\n{context}"
+        result = rag_chain.invoke({"input": prompt_input})
+        answer = result["answer"]
+
+        # 8) save history and return
         insert_chat_history(request.question, answer, request.session_id)
         return ChatResponse(answer=answer)
 
