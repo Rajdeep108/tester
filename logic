@@ -1,10 +1,144 @@
-filters = {
-    "standard_name": "3GPP TR 23.700-67",
-    "standard_version": "V1.0.0"
+import os
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
+
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
+
+ 
+# 1. Set metadata
+{
+    "filename": "3gpp_standard_v1.pdf",
+    "standard_name": "3GPP",
+    "standard_version": "v1",
+    "release_date": "2022-01-01"
 }
+ 
+# 2. Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment="text-embedding-ada-002",
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
 
-all_docs = get_full_docs(filters)
+# -------------------------------
+# Build intent classifier
+# -------------------------------
+def build_intent_classifier():
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
 
-for i, (doc, meta) in enumerate(all_docs):
-    print(f"Doc {i} metadata: {meta}")
-    print(f"Content snippet: {doc[:300]}...\n")
+    system_prompt = """You are an intent classifier.
+Your task:
+1. Classify the user query into one of the following intents:
+- analyze_latest
+- compare_versions
+- compare_standards
+- compare_standard_versions
+- explain_features
+- latest_standard
+
+If none apply, return "none".
+
+Only return the intent key (string)."""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
+
+    return prompt | llm
+
+# classify_intent = build_intent_classifier()
+
+# response = classify_intent.invoke({"query":"Hi"})
+
+from langchain_core.prompts import ChatPromptTemplate
+
+def build_entity_extractor():
+    """
+    Extracts metadata (standard_name, standard_version, release_date) from user query.
+    Returns JSON with keys: standard_name, standard_version, release_date.
+    If not found, values should be null.
+    """
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
+
+    system_prompt = """You are an entity extractor for telecom standards queries.
+From the user query, extract:
+- standard_name (e.g. "3GPP TR 23.700-67")
+- standard_version (e.g. "V1.0.0"). If user provides version like "1.0.0" or "v1.0.0", normalize it to start with an uppercase "V".
+- release_date (if explicitly mentioned, e.g. "2025-04")
+
+Return a JSON object with keys: standard_name, standard_version, release_date.
+If something is not mentioned, set its value to null.
+Only return valid JSON."""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
+
+    return prompt | llm
+
+entity = build_entity_extractor()
+
+reswponse = entity.invoke({"query":"Compare versions 3.0.0 and v6.0.89 for me"})
+print(reswponse.content)
+
+from langchain_chroma import Chroma
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
+
+def get_full_docs(filters: dict):
+    """
+    Returns all documents and metadata matching the given filters.
+    Example filter:
+        {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
+    """
+    # Ensure $and operator for multiple metadata
+    if len(filters) > 1:
+        where = {"$and": [{k: v} for k, v in filters.items()]}
+    else:
+        where = filters
+
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=PATH_TO_VECTORSTORE,
+    )
+    collection = vectordb._collection
+
+    # Fetch all matching docs
+    results = collection.get(include=["documents", "metadatas"], where=where)
+
+    docs = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+    return list(zip(docs, metadatas))
+
+# filters = {
+#     "standard_name": "3GPP TR 23.700-67",
+#     "standard_version": "V1.0.0"
+# }
+
+# all_docs = get_full_docs(filters)
+
+# for i, (doc, meta) in enumerate(all_docs):
+#     print(f"Doc {i} metadata: {meta}")
+#     print(f"Content snippet: {doc[:300]}...\n")
