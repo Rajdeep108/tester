@@ -1,28 +1,10 @@
-from langchain.vectorstores import Chroma
-from agents.utils.rag_pipeline import PATH_TO_VECTORSTORE, embeddings
+filters = {
+    "standard_name": "3GPP TR 23.700-67",
+    "standard_version": "V1.0.0"
+}
 
-def get_full_docs(filters: dict):
-    """
-    Returns all documents and metadata matching the given filters.
-    Example filter:
-        {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
-    """
-    # Ensure $and operator for multiple metadata
-    if len(filters) > 1:
-        where = {"$and": [{k: v} for k, v in filters.items()]}
-    else:
-        where = filters
+all_docs = get_full_docs(filters)
 
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=PATH_TO_VECTORSTORE,
-    )
-    collection = vectordb._collection
-
-    # Fetch all matching docs
-    results = collection.get(include=["documents", "metadatas"], where=where)
-
-    docs = results.get("documents", [])
-    metadatas = results.get("metadatas", [])
-    return list(zip(docs, metadatas))
+for i, (doc, meta) in enumerate(all_docs):
+    print(f"Doc {i} metadata: {meta}")
+    print(f"Content snippet: {doc[:300]}...\n")
