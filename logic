@@ -1,30 +1,11 @@
-import os
-from dotenv import load_dotenv
-
-from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
-load_dotenv()
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
-OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
-OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
-
-# Define intents
-INTENTS = {
-    "analyze_latest": "Please analyze the latest standards for me",
-    "compare_versions": "Please compare versions of a standard",
-    "compare_standards": "Please compare two different standards",
-    "compare_standard_versions": "Please compare a standard across two versions",
-    "explain_features": "Explain the features of a standard",
-    "latest_standard": "Which is the latest standard/version",
-}
-
-# -------------------------------
-# Build intent classifier
-# -------------------------------
-def build_intent_classifier():
+def build_entity_extractor():
+    """
+    Extracts metadata (standard_name, standard_version, release_date) from user query.
+    Returns JSON with keys: standard_name, standard_version, release_date.
+    If not found, values should be null.
+    """
     llm = AzureChatOpenAI(
         api_key=OPENAI_API_KEY,
         api_version=OPENAI_API_VERSION,
@@ -33,19 +14,15 @@ def build_intent_classifier():
         temperature=0
     )
 
-    system_prompt = """You are an intent classifier.
-Your task:
-1. Classify the user query into one of the following intents:
-- analyze_latest
-- compare_versions
-- compare_standards
-- compare_standard_versions
-- explain_features
-- latest_standard
+    system_prompt = """You are an entity extractor for telecom standards queries.
+From the user query, extract:
+- standard_name (e.g. "3GPP TR 23.700-67")
+- standard_version (e.g. "V1.0.0")
+- release_date (if explicitly mentioned)
 
-If none apply, return "none".
-
-Only return the intent key (string)."""
+Return a JSON object with keys: standard_name, standard_version, release_date.
+If something is not mentioned, set its value to null.
+Only return valid JSON."""
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
