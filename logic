@@ -1,93 +1,30 @@
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from test import build_intent_classifier, build_entity_extractor, get_full_docs
 from agents.utils.rag_pipeline import build_rag_chain
-from utils.functions import (
-    insert_chat_history,
-    get_chat_history,
-    get_recent_sessions,
-    get_top_sessions_latest_messages,
-)
 
-router = APIRouter()
+intent_classifier = build_intent_classifier()
+entity_extractor = build_entity_extractor()
 rag_chain = build_rag_chain()
-
-class ChatRequest(BaseModel):
-    question: str
-    session_id: str = None  # Optional for backward compatibility
-
-class ChatResponse(BaseModel):
-    answer: str
-
-class ChatHistoryItem(BaseModel):
-    id: int
-    timestamp: str
-    question: str
-    answer: str
-
-class SessionSummary(BaseModel):
-    session_id: str
-    last_time: str
-
-class SessionLatestMessage(BaseModel):
-    session_id: str
-    id: int
-    timestamp: str
-    question: str
-    answer: str
 
 @router.post("/chat/", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
-    Handle user chat, invoke the RAG pipeline, save history, and return the AI answer.
+    Handle user chat, use intent classification,
+    fallback to RAG if intent is none.
     """
     try:
-        result = rag_chain.invoke({"input": request.question})
-        answer = result["answer"]
+        intent_response = intent_classifier.invoke({"query": request.question})
+        intent = intent_response.content.strip().lower()
+
+        if intent == "none":
+            # fallback → normal RAG
+            result = rag_chain.invoke({"input": request.question})
+            answer = result["answer"]
+        else:
+            # for now, just echo intent (expand later with entities + docs)
+            answer = f"Intent detected: {intent}"
+
         insert_chat_history(request.question, answer, request.session_id)
         return ChatResponse(answer=answer)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/chat-history/", response_model=list[ChatHistoryItem])
-async def chat_history(session_id: str = Query(None)):
-    """
-    Get chat history for a session (or all if session_id is None).
-    """
-    rows = get_chat_history(session_id=session_id)
-    return [
-        ChatHistoryItem(
-            id=row["id"],
-            timestamp=row["timestamp"],
-            question=row["question"],
-            answer=row["answer"]
-        )
-        for row in rows
-    ]
-
-@router.get("/sessions/", response_model=list[SessionSummary])
-async def sessions():
-    """
-    Get summaries of recent sessions.
-    """
-    sessions = get_recent_sessions()
-    return [
-        SessionSummary(session_id=s["session_id"], last_time=s["last_time"])
-        for s in sessions
-    ]
-
-@router.get("/top-sessions-latest/", response_model=list[SessionLatestMessage])
-async def top_sessions_latest():
-    """
-    Get the latest chat message from each of the top 3 latest sessions.
-    """
-    messages = get_top_sessions_latest_messages(limit=3)
-    return [
-        SessionLatestMessage(
-            session_id=m["session_id"],
-            id=m["id"],
-            timestamp=m["timestamp"],
-            question=m["question"],
-            answer=m["answer"],
-        )
-        for m in messages
-    ]
