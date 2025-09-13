@@ -1,65 +1,101 @@
+# Put this in yest.py - replaces your old get_full_docs
 from langchain_chroma import Chroma
+from datetime import datetime
 
-# existing...
-PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
+def _parse_release_date(meta):
+    """Robust attempt to parse release_date into a datetime for sorting."""
+    rd = (meta or {}).get("release_date") or ""
+    rd = rd.strip()
+    if not rd:
+        return datetime.min
+    # try common formats
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+        try:
+            return datetime.strptime(rd, fmt)
+        except Exception:
+            pass
+    # final fallback: try ISO parse
+    try:
+        return datetime.fromisoformat(rd)
+    except Exception:
+        return datetime.min
 
-def get_full_docs(filters: dict, intent: str = None):
+def get_full_docs(filters: dict = None, intent: str = None, persist_dir: str = PATH_TO_VECTORSTORE):
     """
-    Returns documents + metadata for given filters.
-    If no filters and intent is 'analyze_latest' or 'compare_versions',
-    gracefully fallback to latest standards.
+    Returns list[(doc_text, metadata)] matching filters.
+    - filters: dict or None. If provided, constructs a Chroma `where`.
+    - intent: optional string. If filters missing or returned no results,
+      intent-driven fallback behavior is used:
+        - "analyze_latest" -> return the single latest standard (by release_date)
+        - "compare_versions" -> return two latest versions of one standard (if possible)
+    Backwards-compatible: existing callers that call get_full_docs(filters) still work.
     """
     vectordb = Chroma(
         collection_name="standards_collection",
         embedding_function=embeddings,
-        persist_directory=PATH_TO_VECTORSTORE,
+        persist_directory=persist_dir,
     )
     collection = vectordb._collection
 
-    # --- normal flow: filters provided ---
+    # helper to fetch with a where clause, safe wrapper
+    def _collection_get(where_arg=None):
+        try:
+            if where_arg is not None:
+                return collection.get(include=["documents", "metadatas"], where=where_arg)
+            else:
+                return collection.get(include=["documents", "metadatas"])
+        except Exception:
+            # fallback: try a plain get (some versions differ)
+            try:
+                return collection.get(include=["documents", "metadatas"])
+            except Exception:
+                return {"documents": [], "metadatas": []}
+
+    # 1) If filters provided, try strict retrieval first
     if filters:
-        # Ensure $and operator for multiple metadata
-        if len(filters) > 1:
+        if isinstance(filters, dict) and len(filters) > 1:
             where = {"$and": [{k: v} for k, v in filters.items()]}
         else:
             where = filters
-        results = collection.get(include=["documents", "metadatas"], where=where)
-        docs = results.get("documents", [])
-        metadatas = results.get("metadatas", [])
-        return list(zip(docs, metadatas))
+        results = _collection_get(where)
+        docs = results.get("documents", []) or []
+        metas = results.get("metadatas", []) or []
+        if docs and metas:
+            return list(zip(docs, metas))
+        # fall through to fallback behavior if strict filter returned nothing
 
-    # --- fallback flow: no filters ---
-    results = collection.get(include=["documents", "metadatas"])
-    docs = results.get("documents", [])
-    metadatas = results.get("metadatas", [])
-
-    if not docs or not metadatas:
+    # 2) No filters or strict filter returned nothing -> fallback based on intent
+    results = _collection_get(None)
+    docs = results.get("documents", []) or []
+    metas = results.get("metadatas", []) or []
+    if not docs or not metas:
         return []
 
-    # analyze_latest → return most recent doc
-    if intent == "analyze_latest":
-        sorted_items = sorted(
-            zip(docs, metadatas),
-            key=lambda x: x[1].get("release_date", ""),
-            reverse=True
-        )
-        return [sorted_items[0]]
+    items = list(zip(docs, metas))
 
-    # compare_versions → return 2 most recent versions of same standard
+    # analyze_latest -> pick the single latest by release_date
+    if intent == "analyze_latest":
+        items_sorted = sorted(items, key=lambda x: _parse_release_date(x[1]), reverse=True)
+        return [items_sorted[0]] if items_sorted else []
+
+    # compare_versions -> try to find a standard with >=2 versions; pick its 2 latest;
+    # if none, fall back to two most recent docs overall
     if intent == "compare_versions":
         grouped = {}
-        for doc, meta in zip(docs, metadatas):
-            name = meta.get("standard_name")
-            if not name:
-                continue
+        for doc, meta in items:
+            name = meta.get("standard_name") or meta.get("filename") or "UNKNOWN"
             grouped.setdefault(name, []).append((doc, meta))
 
-        for name, items in grouped.items():
-            if len(items) >= 2:
-                items_sorted = sorted(
-                    items, key=lambda x: x[1].get("release_date", ""), reverse=True
-                )
-                return items_sorted[:2]
+        # look for a group with >=2 entries
+        for name, lst in grouped.items():
+            if len(lst) >= 2:
+                lst_sorted = sorted(lst, key=lambda x: _parse_release_date(x[1]), reverse=True)
+                return lst_sorted[:2]
 
-    # default: return nothing
-    return []
+        # fallback: return top 2 overall
+        items_sorted = sorted(items, key=lambda x: _parse_release_date(x[1]), reverse=True)
+        return items_sorted[:2]
+
+    # default fallback: return up to a reasonable number so callers don't get overloaded
+    MAX_RETURN = 50
+    return items[:MAX_RETURN]
