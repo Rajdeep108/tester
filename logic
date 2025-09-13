@@ -1,72 +1,65 @@
-# 4) build filters and collect all docs for each filter via get_full_docs
-        all_docs = []  # list of (doc_text, metadata)
+from langchain_chroma import Chroma
 
-        if standard_names:
-            # normal flow when standard names exist
-            for i, name in enumerate(standard_names):
-                filters = {"standard_name": name}
-                if i < len(standard_versions) and standard_versions[i]:
-                    filters["standard_version"] = standard_versions[i]
-                docs = get_full_docs(filters)
-                all_docs.extend(docs)
+# existing...
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
 
-        elif standard_versions:
-            # only versions given
-            for v in standard_versions:
-                filters = {"standard_version": v}
-                docs = get_full_docs(filters)
-                all_docs.extend(docs)
+def get_full_docs(filters: dict, intent: str = None):
+    """
+    Returns documents + metadata for given filters.
+    If no filters and intent is 'analyze_latest' or 'compare_versions',
+    gracefully fallback to latest standards.
+    """
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=PATH_TO_VECTORSTORE,
+    )
+    collection = vectordb._collection
 
+    # --- normal flow: filters provided ---
+    if filters:
+        # Ensure $and operator for multiple metadata
+        if len(filters) > 1:
+            where = {"$and": [{k: v} for k, v in filters.items()]}
         else:
-            # ⚡ no metadata extracted → fallback rules
-            if intent == "analyze_latest":
-                # get the single most recent doc
-                vectordb = Chroma(
-                    collection_name="standards_collection",
-                    embedding_function=embeddings,
-                    persist_directory=PATH_TO_VECTORSTORE,
+            where = filters
+        results = collection.get(include=["documents", "metadatas"], where=where)
+        docs = results.get("documents", [])
+        metadatas = results.get("metadatas", [])
+        return list(zip(docs, metadatas))
+
+    # --- fallback flow: no filters ---
+    results = collection.get(include=["documents", "metadatas"])
+    docs = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+
+    if not docs or not metadatas:
+        return []
+
+    # analyze_latest → return most recent doc
+    if intent == "analyze_latest":
+        sorted_items = sorted(
+            zip(docs, metadatas),
+            key=lambda x: x[1].get("release_date", ""),
+            reverse=True
+        )
+        return [sorted_items[0]]
+
+    # compare_versions → return 2 most recent versions of same standard
+    if intent == "compare_versions":
+        grouped = {}
+        for doc, meta in zip(docs, metadatas):
+            name = meta.get("standard_name")
+            if not name:
+                continue
+            grouped.setdefault(name, []).append((doc, meta))
+
+        for name, items in grouped.items():
+            if len(items) >= 2:
+                items_sorted = sorted(
+                    items, key=lambda x: x[1].get("release_date", ""), reverse=True
                 )
-                collection = vectordb._collection
-                results = collection.get(include=["documents", "metadatas"])
-                metadatas = results.get("metadatas", [])
-                docs = results.get("documents", [])
+                return items_sorted[:2]
 
-                if metadatas and docs:
-                    # sort by release_date if exists, else pick last one
-                    sorted_items = sorted(
-                        zip(docs, metadatas),
-                        key=lambda x: x[1].get("release_date", ""),
-                        reverse=True
-                    )
-                    all_docs.append(sorted_items[0])
-
-            elif intent == "compare_versions":
-                # fetch two latest versions of the same standard
-                vectordb = Chroma(
-                    collection_name="standards_collection",
-                    embedding_function=embeddings,
-                    persist_directory=PATH_TO_VECTORSTORE,
-                )
-                collection = vectordb._collection
-                results = collection.get(include=["documents", "metadatas"])
-                metadatas = results.get("metadatas", [])
-                docs = results.get("documents", [])
-
-                if metadatas and docs:
-                    # group by standard_name
-                    grouped = {}
-                    for doc, meta in zip(docs, metadatas):
-                        name = meta.get("standard_name")
-                        if not name:
-                            continue
-                        grouped.setdefault(name, []).append((doc, meta))
-
-                    # pick first standard with >= 2 versions
-                    for name, items in grouped.items():
-                        if len(items) >= 2:
-                            # sort by release_date desc and take top 2
-                            items_sorted = sorted(
-                                items, key=lambda x: x[1].get("release_date", ""), reverse=True
-                            )
-                            all_docs.extend(items_sorted[:2])
-                            break
+    # default: return nothing
+    return []
