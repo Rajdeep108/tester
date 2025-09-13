@@ -1,35 +1,115 @@
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import AzureChatOpenAI
-import os
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from agents.utils.rag_pipeline import (
+    build_intent_classifier,
+    build_entity_extractor,
+    get_full_docs,
+    build_rag_chain
+)
+from utils.functions import insert_chat_history, get_chat_history
 
-def build_entity_extractor():
-    """
-    Extracts metadata (standard_names, standard_versions, release_date) from user query.
-    Returns JSON with keys: standard_names (list), standard_versions (list), release_date (string/null).
-    If nothing found, lists can be empty and release_date null.
-    """
-    llm = AzureChatOpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        api_version=os.getenv("OPENAI_VERSION"),
-        azure_deployment=os.getenv("OPENAI_DEPLOYMENT"),
-        azure_endpoint=os.getenv("OPENAI_BASE"),
-        temperature=0
-    )
+router = APIRouter()
 
-    system_prompt = """You are an entity extractor for telecom standards queries.
-From the user query, extract:
+# Build chains once
+intent_classifier = build_intent_classifier()
+entity_extractor = build_entity_extractor()
+rag_chain = build_rag_chain()
 
-- standard_names: a list of all standard names mentioned (e.g., ["3GPP TR 23.700-67"]).
-- standard_versions: a list of all versions mentioned. Normalize them to start with uppercase 'V' (e.g., "1.0.0" -> "V1.0.0", "v6.0.89" -> "V6.0.89").
-- release_date: the release date if explicitly mentioned (e.g., "2025-04"), else null.
+# -------------------
+# Request/Response Models
+# -------------------
+class ChatRequest(BaseModel):
+    question: str
 
-Return a single JSON object with keys: standard_names, standard_versions, release_date.
-If something is not mentioned, lists can be empty and release_date should be null.
-Only return valid JSON."""
+class ChatResponse(BaseModel):
+    answer: str
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{query}")
-    ])
+class ChatHistoryItem(BaseModel):
+    id: int
+    timestamp: str
+    question: str
+    answer: str
 
-    return prompt | llm
+# -------------------
+# Chat Endpoint
+# -------------------
+@router.post("/chat/", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    try:
+        query = request.question
+
+        # 1️⃣ Classify Intent
+        intent_response = intent_classifier.invoke({"query": query})
+        intent = intent_response.content.strip()
+        
+        # 2️⃣ Extract Entities (standards, versions)
+        entity_response = entity_extractor.invoke({"query": query})
+        entities = entity_response.content
+        # Convert JSON string to dict safely
+        import json
+        try:
+            entities = json.loads(entities)
+        except:
+            entities = {"standard_names": [], "standard_versions": [], "release_date": None}
+
+        standard_names = entities.get("standard_names", [])
+        standard_versions = entities.get("standard_versions", [])
+        release_date = entities.get("release_date", None)
+
+        # 3️⃣ Determine full documents to retrieve
+        all_text_chunks = []
+
+        if intent != "none" and standard_names:
+            # Loop over all standard_name/version pairs
+            for i, std_name in enumerate(standard_names):
+                version = standard_versions[i] if i < len(standard_versions) else None
+                filters = {"standard_name": std_name}
+                if version:
+                    filters["standard_version"] = version
+                docs = get_full_docs(filters)
+                for doc, meta in docs:
+                    all_text_chunks.append(doc)
+        
+        # If no docs found or intent is none, fallback to general RAG
+        if not all_text_chunks or intent == "none":
+            result = rag_chain.invoke({"input": query})
+            answer = result["answer"]
+        else:
+            # Concatenate all chunks into one context
+            context_text = "\n\n".join(all_text_chunks)
+            
+            # Build a simple prompt for summarization / analysis
+            analysis_prompt = f"""
+You are a telecom standards assistant. Use the following context to answer the user query:
+Context:
+{context_text}
+
+Question: {query}
+Answer concisely and accurately:
+"""
+            result = rag_chain.invoke({"input": analysis_prompt})
+            answer = result["answer"]
+
+        # 4️⃣ Insert chat history
+        insert_chat_history(query, answer)
+
+        return ChatResponse(answer=answer)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -------------------
+# Chat History Endpoint
+# -------------------
+@router.get("/chat-history/", response_model=list[ChatHistoryItem])
+async def chat_history():
+    rows = get_chat_history()
+    return [
+        ChatHistoryItem(
+            id=row[0],
+            timestamp=row[1],
+            question=row[2],
+            answer=row[3]
+        )
+        for row in rows
+    ]
