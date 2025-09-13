@@ -1,115 +1,145 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from agents.utils.rag_pipeline import (
-    build_intent_classifier,
-    build_entity_extractor,
-    get_full_docs,
-    build_rag_chain
-)
-from utils.functions import insert_chat_history, get_chat_history
+import os
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
 
-router = APIRouter()
 
-# Build chains once
-intent_classifier = build_intent_classifier()
-entity_extractor = build_entity_extractor()
-rag_chain = build_rag_chain()
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
-# -------------------
-# Request/Response Models
-# -------------------
-class ChatRequest(BaseModel):
-    question: str
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
 
-class ChatResponse(BaseModel):
-    answer: str
+ 
+# 1. Set metadata
+{
+    "filename": "3gpp_standard_v1.pdf",
+    "standard_name": "3GPP",
+    "standard_version": "v1",
+    "release_date": "2022-01-01"
+}
+ 
+# 2. Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment="text-embedding-ada-002",
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
 
-class ChatHistoryItem(BaseModel):
-    id: int
-    timestamp: str
-    question: str
-    answer: str
+# -------------------------------
+# Build intent classifier
+# -------------------------------
+def build_intent_classifier():
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
 
-# -------------------
-# Chat Endpoint
-# -------------------
-@router.post("/chat/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        query = request.question
+    system_prompt = """You are an intent classifier.
+Your task:
+1. Classify the user query into one of the following intents:
+- analyze_latest
+- compare_versions
+- compare_standards
+- compare_standard_versions
+- explain_features
+- latest_standard
 
-        # 1️⃣ Classify Intent
-        intent_response = intent_classifier.invoke({"query": query})
-        intent = intent_response.content.strip()
-        
-        # 2️⃣ Extract Entities (standards, versions)
-        entity_response = entity_extractor.invoke({"query": query})
-        entities = entity_response.content
-        # Convert JSON string to dict safely
-        import json
-        try:
-            entities = json.loads(entities)
-        except:
-            entities = {"standard_names": [], "standard_versions": [], "release_date": None}
+If none apply, return "none".
 
-        standard_names = entities.get("standard_names", [])
-        standard_versions = entities.get("standard_versions", [])
-        release_date = entities.get("release_date", None)
+Only return the intent key (string)."""
 
-        # 3️⃣ Determine full documents to retrieve
-        all_text_chunks = []
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
 
-        if intent != "none" and standard_names:
-            # Loop over all standard_name/version pairs
-            for i, std_name in enumerate(standard_names):
-                version = standard_versions[i] if i < len(standard_versions) else None
-                filters = {"standard_name": std_name}
-                if version:
-                    filters["standard_version"] = version
-                docs = get_full_docs(filters)
-                for doc, meta in docs:
-                    all_text_chunks.append(doc)
-        
-        # If no docs found or intent is none, fallback to general RAG
-        if not all_text_chunks or intent == "none":
-            result = rag_chain.invoke({"input": query})
-            answer = result["answer"]
-        else:
-            # Concatenate all chunks into one context
-            context_text = "\n\n".join(all_text_chunks)
-            
-            # Build a simple prompt for summarization / analysis
-            analysis_prompt = f"""
-You are a telecom standards assistant. Use the following context to answer the user query:
-Context:
-{context_text}
+    return prompt | llm
 
-Question: {query}
-Answer concisely and accurately:
-"""
-            result = rag_chain.invoke({"input": analysis_prompt})
-            answer = result["answer"]
+# classify_intent = build_intent_classifier()
 
-        # 4️⃣ Insert chat history
-        insert_chat_history(query, answer)
+# response = classify_intent.invoke({"query":"Hi"})
 
-        return ChatResponse(answer=answer)
+from langchain_core.prompts import ChatPromptTemplate
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def build_entity_extractor():
+    """
+    Extracts metadata (standard_names, standard_versions, release_date) from user query.
+    Returns JSON with keys: standard_names (list), standard_versions (list), release_date (string/null).
+    If nothing found, lists can be empty and release_date null.
+    """
+    llm = AzureChatOpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        api_version=os.getenv("OPENAI_VERSION"),
+        azure_deployment=os.getenv("OPENAI_DEPLOYMENT"),
+        azure_endpoint=os.getenv("OPENAI_BASE"),
+        temperature=0
+    )
 
-# -------------------
-# Chat History Endpoint
-# -------------------
-@router.get("/chat-history/", response_model=list[ChatHistoryItem])
-async def chat_history():
-    rows = get_chat_history()
-    return [
-        ChatHistoryItem(
-            id=row[0],
-            timestamp=row[1],
-            question=row[2],
-            answer=row[3]
-        )
-        for row in rows
-    ]
+    system_prompt = """You are an entity extractor for telecom standards queries.
+From the user query, extract:
+
+- standard_names: a list of all standard names mentioned (e.g., ["3GPP TR 23.700-67"]).
+- standard_versions: a list of all versions mentioned. Normalize them to start with uppercase 'V' (e.g., "1.0.0" -> "V1.0.0", "v6.0.89" -> "V6.0.89").
+- release_date: the release date if explicitly mentioned (e.g., "2025-04"), else null.
+
+Return a single JSON object with keys: standard_names, standard_versions, release_date.
+If something is not mentioned, lists can be empty and release_date should be null.
+Only return valid JSON."""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
+
+    return prompt | llm
+
+entity = build_entity_extractor()
+
+reswponse = entity.invoke({"query":"please analyze standard 3gpp tse 23.243.12 for me"})
+print(reswponse.content)
+
+from langchain_chroma import Chroma
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
+
+def get_full_docs(filters: dict):
+    """
+    Returns all documents and metadata matching the given filters.
+    Example filter:
+        {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
+    """
+    # Ensure $and operator for multiple metadata
+    if len(filters) > 1:
+        where = {"$and": [{k: v} for k, v in filters.items()]}
+    else:
+        where = filters
+
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=PATH_TO_VECTORSTORE,
+    )
+    collection = vectordb._collection
+
+    # Fetch all matching docs
+    results = collection.get(include=["documents", "metadatas"], where=where)
+
+    docs = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+    return list(zip(docs, metadatas))
+
+# filters = {
+#     "standard_name": "3GPP TR 23.700-67",
+#     "standard_version": "V1.0.0"
+# }
+
+# all_docs = get_full_docs(filters)
+
+# for i, (doc, meta) in enumerate(all_docs):
+#     print(f"Doc {i} metadata: {meta}")
+#     print(f"Content snippet: {doc[:300]}...\n")
