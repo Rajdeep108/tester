@@ -1,74 +1,72 @@
-# relevant imports
-import json
-from fastapi import HTTPException
-from yest import build_intent_classifier, build_entity_extractor, get_full_docs
-from agents.utils.rag_pipeline import build_rag_chain
-from utils.functions import insert_chat_history
-
-# init (do once)
-intent_classifier = build_intent_classifier()
-entity_extractor = build_entity_extractor()
-rag_chain = build_rag_chain()
-
-@router.post("/chat/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        # 1) classify intent
-        intent_resp = intent_classifier.invoke({"query": request.question})
-        intent = getattr(intent_resp, "content", "none").strip().lower()
-
-        # 2) if none -> quick RAG fallback
-        if intent == "none":
-            result = rag_chain.invoke({"input": request.question})
-            answer = result["answer"]
-            insert_chat_history(request.question, answer, request.session_id)
-            return ChatResponse(answer=answer)
-
-        # 3) extract entities (may contain lists)
-        ent_resp = entity_extractor.invoke({"query": request.question})
-        try:
-            entities = json.loads(ent_resp.content)
-        except Exception:
-            entities = {"standard_names": [], "standard_versions": [], "release_date": None}
-
-        standard_names = entities.get("standard_names", []) or []
-        standard_versions = entities.get("standard_versions", []) or []
-
-        # 4) build filters and collect all docs for each filter via get_full_docs
+# 4) build filters and collect all docs for each filter via get_full_docs
         all_docs = []  # list of (doc_text, metadata)
+
         if standard_names:
+            # normal flow when standard names exist
             for i, name in enumerate(standard_names):
                 filters = {"standard_name": name}
                 if i < len(standard_versions) and standard_versions[i]:
                     filters["standard_version"] = standard_versions[i]
                 docs = get_full_docs(filters)
                 all_docs.extend(docs)
+
         elif standard_versions:
+            # only versions given
             for v in standard_versions:
                 filters = {"standard_version": v}
                 docs = get_full_docs(filters)
                 all_docs.extend(docs)
 
-        # 5) if no docs found -> fallback to RAG
-        if not all_docs:
-            result = rag_chain.invoke({"input": request.question})
-            answer = result["answer"]
-            insert_chat_history(request.question, answer, request.session_id)
-            return ChatResponse(answer=answer)
+        else:
+            # ⚡ no metadata extracted → fallback rules
+            if intent == "analyze_latest":
+                # get the single most recent doc
+                vectordb = Chroma(
+                    collection_name="standards_collection",
+                    embedding_function=embeddings,
+                    persist_directory=PATH_TO_VECTORSTORE,
+                )
+                collection = vectordb._collection
+                results = collection.get(include=["documents", "metadatas"])
+                metadatas = results.get("metadatas", [])
+                docs = results.get("documents", [])
 
-        # 6) build context from retrieved docs (limit chunks to avoid huge payload)
-        MAX_CHUNKS = 20
-        selected = all_docs[:MAX_CHUNKS]
-        context = "\n\n".join([doc for doc, _meta in selected])
+                if metadatas and docs:
+                    # sort by release_date if exists, else pick last one
+                    sorted_items = sorted(
+                        zip(docs, metadatas),
+                        key=lambda x: x[1].get("release_date", ""),
+                        reverse=True
+                    )
+                    all_docs.append(sorted_items[0])
 
-        # 7) ask RAG with structured prompt + context
-        prompt_input = f"Intent: {intent}\n\nQuery: {request.question}\n\nContext:\n{context}"
-        result = rag_chain.invoke({"input": prompt_input})
-        answer = result["answer"]
+            elif intent == "compare_versions":
+                # fetch two latest versions of the same standard
+                vectordb = Chroma(
+                    collection_name="standards_collection",
+                    embedding_function=embeddings,
+                    persist_directory=PATH_TO_VECTORSTORE,
+                )
+                collection = vectordb._collection
+                results = collection.get(include=["documents", "metadatas"])
+                metadatas = results.get("metadatas", [])
+                docs = results.get("documents", [])
 
-        # 8) save history and return
-        insert_chat_history(request.question, answer, request.session_id)
-        return ChatResponse(answer=answer)
+                if metadatas and docs:
+                    # group by standard_name
+                    grouped = {}
+                    for doc, meta in zip(docs, metadatas):
+                        name = meta.get("standard_name")
+                        if not name:
+                            continue
+                        grouped.setdefault(name, []).append((doc, meta))
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+                    # pick first standard with >= 2 versions
+                    for name, items in grouped.items():
+                        if len(items) >= 2:
+                            # sort by release_date desc and take top 2
+                            items_sorted = sorted(
+                                items, key=lambda x: x[1].get("release_date", ""), reverse=True
+                            )
+                            all_docs.extend(items_sorted[:2])
+                            break
