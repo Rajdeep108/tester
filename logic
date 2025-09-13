@@ -1,64 +1,55 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+import os
+from dotenv import load_dotenv
 
-from agents.utils.rag_pipeline import (
-    build_rag_chain,
-    build_intent_entity_extractor,
-    run_intent_query,
-    INTENTS
-)
-from utils.functions import insert_chat_history, get_chat_history
-import json
+from langchain_openai import AzureChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 
-router = APIRouter()
+load_dotenv()
 
-rag_chain = build_rag_chain()
-intent_entity_extractor = build_intent_entity_extractor()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
-class ChatRequest(BaseModel):
-    question: str
+# Define intents
+INTENTS = {
+    "analyze_latest": "Please analyze the latest standards for me",
+    "compare_versions": "Please compare versions of a standard",
+    "compare_standards": "Please compare two different standards",
+    "compare_standard_versions": "Please compare a standard across two versions",
+    "explain_features": "Explain the features of a standard",
+    "latest_standard": "Which is the latest standard/version",
+}
 
-class ChatResponse(BaseModel):
-    answer: str
+# -------------------------------
+# Build intent classifier
+# -------------------------------
+def build_intent_classifier():
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
 
-class ChatHistoryItem(BaseModel):
-    id: int
-    timestamp: str
-    question: str
-    answer: str
+    system_prompt = """You are an intent classifier.
+Your task:
+1. Classify the user query into one of the following intents:
+- analyze_latest
+- compare_versions
+- compare_standards
+- compare_standard_versions
+- explain_features
+- latest_standard
 
-@router.post("/chat/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        # Step 1: Extract intent + entities
-        parsed = intent_entity_extractor.invoke({"query": request.question}).content
-        parsed_json = json.loads(parsed)
+If none apply, return "none".
 
-        intent = parsed_json.get("intent", "none")
+Only return the intent key (string)."""
 
-        if intent in INTENTS:
-            # Intent-aware RAG
-            answer = run_intent_query(request.question, parsed_json)
-        else:
-            # Normal RAG
-            result = rag_chain.invoke({"input": request.question})
-            answer = result["answer"]
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
 
-        insert_chat_history(request.question, answer)
-        return ChatResponse(answer=answer)
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/chat-history/", response_model=list[ChatHistoryItem])
-async def chat_history():
-    rows = get_chat_history()
-    return [
-        ChatHistoryItem(
-            id=row[0],
-            timestamp=row[1],
-            question=row[2],
-            answer=row[3]
-        )
-        for row in rows
-    ]
+    return prompt | llm
