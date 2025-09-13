@@ -1,32 +1,18 @@
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_chroma import Chroma
 
-def build_entity_extractor():
+def get_filtered_retriever(filters: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
     """
-    Extracts metadata (standard_name, standard_version, release_date) from user query.
-    Returns JSON with keys: standard_name, standard_version, release_date.
-    If not found, values should be null.
+    Returns a Chroma retriever that only fetches documents matching the provided metadata.
+    Example filters:
+        {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
     """
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
     )
 
-    system_prompt = """You are an entity extractor for telecom standards queries.
-From the user query, extract:
-- standard_name (e.g. "3GPP TR 23.700-67")
-- standard_version (e.g. "V1.0.0")
-- release_date (if explicitly mentioned)
-
-Return a JSON object with keys: standard_name, standard_version, release_date.
-If something is not mentioned, set its value to null.
-Only return valid JSON."""
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{query}")
-    ])
-
-    return prompt | llm
+    return vectordb.as_retriever(
+        search_kwargs={"k": 3},
+        filter=filters if filters else None
+    )
