@@ -1,181 +1,356 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from agents.utils.rag_pipeline import build_rag_chain
-from utils.functions import insert_chat_history, get_chat_history
+# rag_intent_pipeline.py
+import re
+import json
+from typing import Optional, List, Tuple, Dict, Any
 
-router = APIRouter()
-rag_chain = build_rag_chain()
+# Assumes you provide these from your existing code:
+# - vectordb: the Chroma client instance
+# - rag_chain: the RAG retrieval-generation chain (your existing chain)
+# - llm: the chat model used for classification and final generation (e.g., AzureChatOpenAI)
 
-class ChatRequest(BaseModel):
-    question: str
+# ---------------------------
+# Utilities
+# ---------------------------
 
-class ChatResponse(BaseModel):
-    answer: str
+def normalize(text: str) -> str:
+    return re.sub(r'[^a-z0-9]+', ' ', (text or "").lower()).strip()
 
-class ChatHistoryItem(BaseModel):
-    id: int
-    timestamp: str
-    question: str
-    answer: str
+def fuzzy_match(needle: str, haystack: str) -> bool:
+    if not needle or not haystack:
+        return False
+    return normalize(needle) in normalize(haystack)
 
-@router.post("/chat/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    try:
-        result = rag_chain.invoke({"input": request.question})
-        answer = result["answer"]
-        insert_chat_history(request.question, answer)
-        return ChatResponse(answer=answer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def fetch_all(vectordb) -> List[Tuple[Dict[str, Any], str]]:
+    """Return list of (metadata, document_text) tuples from Chroma."""
+    results = vectordb.get()
+    return list(zip(results.get("metadatas", []), results.get("documents", [])))
 
-@router.get("/chat-history/", response_model=list[ChatHistoryItem])
-async def chat_history():
-    rows = get_chat_history()
-    return [
-        ChatHistoryItem(
-            id=row[0],
-            timestamp=row[1],
-            question=row[2],
-            answer=row[3]
-        )
-        for row in rows
+def semantic_fallback_documents(vectordb, query: str, k: int = 3):
+    """Return a list of Document-like objects from retriever as fallback."""
+    retriever = vectordb.as_retriever(search_kwargs={"k": k})
+    return retriever.get_relevant_documents(query)
+
+def pick_latest(docs: List[Tuple[Dict[str, Any], str]]):
+    """Pick tuple (meta, text) with max release_date (lexicographically OK for YYYY-MM-DD)."""
+    if not docs:
+        return None
+    return max(docs, key=lambda d: d[0].get("release_date", ""))
+
+# ---------------------------
+# Intent Handlers (lenient + fallback)
+# Each returns a text 'context' suitable for passing into LLM prompts.
+# ---------------------------
+
+def handle_analyze_latest(vectordb, standard_name: Optional[str] = None) -> str:
+    docs = fetch_all(vectordb)
+    if not docs:
+        return "No standards ingested in the database."
+
+    if standard_name:
+        matches = [d for d in docs if fuzzy_match(standard_name, d[0].get("standard_name", ""))]
+        target_docs = matches if matches else docs  # fallback to global if none matched
+    else:
+        target_docs = docs
+
+    latest = pick_latest(target_docs)
+    if not latest:
+        return "No standard found to analyze."
+
+    meta, text = latest
+    return (
+        f"NAME: {meta.get('standard_name')} "
+        f"VERSION: {meta.get('standard_version')} "
+        f"RELEASE: {meta.get('release_date')}\n\n"
+        f"{text}"
+    )
+
+
+def handle_compare_versions(vectordb, standard_name: Optional[str] = None, versions: Optional[List[str]] = None) -> str:
+    docs = fetch_all(vectordb)
+    if not docs:
+        return "No standards ingested."
+
+    # If standard not provided -> pick global latest standard
+    if not standard_name:
+        latest = pick_latest(docs)
+        if not latest:
+            return "No versions available to compare."
+        standard_name = latest[0].get("standard_name")
+
+    matches = [d for d in docs if fuzzy_match(standard_name, d[0].get("standard_name", ""))]
+    if not matches:
+        # fallback semantic
+        docs_sem = semantic_fallback_documents(vectordb, f"Compare versions of {standard_name}")
+        if not docs_sem:
+            return f"No data found for {standard_name}."
+        return "\n\n---\n\n".join([f"{(getattr(d,'metadata',{}) or d.metadata).get('standard_version','?')}:\n{d.page_content}" for d in docs_sem])
+
+    # If no versions specified -> pick latest two
+    if not versions:
+        sorted_matches = sorted(matches, key=lambda d: d[0].get("release_date", ""), reverse=True)
+        top = sorted_matches[:2]
+        return "\n\n---\n\n".join([f"{m[0].get('standard_version')} ({m[0].get('release_date')}):\n{text}" for m, text in top])
+
+    # Filter matches by provided versions (fuzzy)
+    filtered = [
+        d for d in matches
+        if any(fuzzy_match(v, d[0].get("standard_version", "")) for v in versions)
     ]
+    if not filtered:
+        # fallback to semantic retrieval mentioning both versions
+        docs_sem = semantic_fallback_documents(vectordb, f"Compare {standard_name} versions {' '.join(versions)}")
+        if not docs_sem:
+            return f"No matching versions found for {standard_name} {versions}."
+        return "\n\n---\n\n".join([d.page_content for d in docs_sem])
+
+    return "\n\n---\n\n".join([f"{m[0].get('standard_version')} ({m[0].get('release_date')}):\n{text}" for m, text in filtered])
 
 
+def handle_compare_standards(vectordb, standards: Optional[List[str]] = None) -> str:
+    docs = fetch_all(vectordb)
+    if not docs:
+        return "No standards ingested."
+
+    if not standards or len(standards) < 2:
+        # If user didn't specify, return top 2 latest standards overall
+        sorted_all = sorted(docs, key=lambda d: d[0].get("release_date", ""), reverse=True)
+        top2 = sorted_all[:2]
+        if not top2:
+            return "Not enough standards available for comparison."
+        return "\n\n---\n\n".join([f"{m[0].get('standard_name')} {m[0].get('standard_version')} ({m[0].get('release_date')}):\n{text}" for m, text in top2])
+
+    matches = [d for d in docs if any(fuzzy_match(s, d[0].get("standard_name", "")) for s in standards)]
+    if not matches:
+        docs_sem = semantic_fallback_documents(vectordb, f"Compare standards {' and '.join(standards)}")
+        if not docs_sem:
+            return f"No data found for {standards}."
+        return "\n\n---\n\n".join([d.page_content for d in docs_sem])
+
+    # Group by standard_name to avoid duplicates and show representative chunks
+    grouped = {}
+    for meta, txt in matches:
+        key = normalize(meta.get("standard_name", "")) or meta.get("standard_name")
+        grouped.setdefault(key, []).append((meta, txt))
+
+    outputs = []
+    for key, items in grouped.items():
+        # pick latest chunk per standard
+        latest_item = max(items, key=lambda it: it[0].get("release_date", ""))
+        outputs.append(f"{latest_item[0].get('standard_name')} ({latest_item[0].get('standard_version')}):\n{latest_item[1]}")
+
+    return "\n\n---\n\n".join(outputs)
 
 
+def handle_compare_standard_versions(vectordb, standard_name: Optional[str] = None, versions: Optional[List[str]] = None) -> str:
+    # semantic alias -> same behavior as compare_versions but kept separate for clarity
+    return handle_compare_versions(vectordb, standard_name, versions)
 
 
+def handle_explain_features(vectordb, standard_name: Optional[str] = None, version: Optional[str] = None) -> str:
+    docs = fetch_all(vectordb)
+    if not docs:
+        return "No standards ingested."
+
+    if not standard_name:
+        # explain latest overall
+        latest = pick_latest(docs)
+        if not latest:
+            return "No standards to explain."
+        return f"Explaining latest standard {latest[0].get('standard_name')} ({latest[0].get('standard_version')}):\n\n{latest[1]}"
+
+    matches = [
+        d for d in docs if fuzzy_match(standard_name, d[0].get("standard_name", "")) and
+        (not version or fuzzy_match(version, d[0].get("standard_version", "")))
+    ]
+    if not matches:
+        docs_sem = semantic_fallback_documents(vectordb, f"Explain features of {standard_name} {version or ''}")
+        if not docs_sem:
+            return f"No data found for {standard_name} {version or ''}."
+        return docs_sem[0].page_content
+
+    # return the most relevant / latest match
+    best = max(matches, key=lambda d: d[0].get("release_date", ""))
+    return best[1]
 
 
+def handle_latest_standard(vectordb) -> str:
+    docs = fetch_all(vectordb)
+    if not docs:
+        return "No standards ingested."
+    latest = pick_latest(docs)
+    if not latest:
+        return "No standards with release_date metadata found."
+    meta, text = latest
+    return f"Latest standard: {meta.get('standard_name')} ({meta.get('standard_version')}) released on {meta.get('release_date')}.\n\n{text}"
 
-import os
-from dotenv import load_dotenv
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain_core.prompts import ChatPromptTemplate
+# ---------------------------
+# LLM-based Intent Classifier (structured JSON)
+# ---------------------------
 
+def classify_intent_with_llm(user_query: str, llm) -> Tuple[str, Dict[str, Any]]:
+    """
+    Instruct the LLM to return JSON with keys:
+      - intent: one of the six intent keys, or "none"
+      - standard_name: string or null
+      - versions: list or null
+      - release_date: string or null
 
-load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
-OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
-OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
+    Returns (intent, params_dict). If parsing fails -> return ("none", {}).
+    """
+    schema_and_instructions = """
+You are an assistant that MUST classify user queries about telecom standards.
+Return JSON ONLY (no extra text). The JSON must have keys:
+- intent: one of ["analyze_latest", "compare_versions", "compare_standards", "compare_standard_versions", "explain_features", "latest_standard", "none"]
+- standard_name: the standard name if present (string) or null
+- versions: list of versions mentioned (e.g. ["v1","v2"]) or null
+- release_date: a release date if mentioned (YYYY-MM-DD or year) or null
+If the query is general chit-chat or not about telecom standards, set intent to "none".
 
-PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
+Examples:
+User: "Compare 3GPP TR 23.700-67 v1.0.0 and v2.0.0"
+-> intent: "compare_versions", standard_name: "3GPP TR 23.700-67", versions: ["v1.0.0", "v2.0.0"]
 
-INTENTS = {
-    "analyze_latest": "Please analyze the latest standards for me",
-    "compare_versions": "Please compare versions of a standard",
-    "compare_standards": "Please compare two different standards",
-    "compare_standard_versions": "Please compare a standard across two versions",
-    "explain_features": "Explain the features of a standard",
-    "latest_standard": "Which is the latest standard/version",
-}
- 
-# 1. Set metadata
-{
-    "filename": "3gpp_standard_v1.pdf",
-    "standard_name": "3GPP",
-    "standard_version": "v1",
-    "release_date": "2022-01-01"
-}
- 
-# 2. Initialize embeddings
-embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
-                      api_version=OPENAI_API_VERSION,
-                      azure_deployment="text-embedding-ada-002",
-                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
+User: "What's the weather?"
+-> intent: "none", standard_name: null, versions: null, release_date: null
+"""
 
-
-# take these two into doc uploader----------------------------------------------------------------------------------
-def already_ingested(standard_name, standard_version, persist_dir):
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    # Query for any document with this metadata
-    results = vectordb.get(
-        where={
-            "$and": [
-                {"standard_name": standard_name},
-                {"standard_version": standard_version}
-            ]
+    prompt = f"{schema_and_instructions}\n\nUser query: {user_query}\n\nReturn JSON now."
+    # call llm - adapt to your llm API (the method used here is illustrative)
+    resp = llm.invoke(prompt)  # expects an object with .content or .text
+    text = getattr(resp, "content", None) or getattr(resp, "text", None) or str(resp)
+    try:
+        parsed = json.loads(text)
+        intent = parsed.get("intent", "none")
+        if intent not in [
+            "analyze_latest",
+            "compare_versions",
+            "compare_standards",
+            "compare_standard_versions",
+            "explain_features",
+            "latest_standard",
+            "none"
+        ]:
+            intent = "none"
+        return intent, {
+            "standard_name": parsed.get("standard_name"),
+            "versions": parsed.get("versions"),
+            "release_date": parsed.get("release_date"),
+            # allow also returning a "standards" list for compare_standards
+            "standards": parsed.get("standards"),
         }
-    )
-    return len(results['ids']) > 0
+    except Exception:
+        # If parsing fails, treat as general query so we don't block normal QA
+        return "none", {}
 
- 
-# 3. Ingestor: split, embed, and store in ChromaDB
-def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
-    standard_name = metadata.get("standard_name")
-    standard_version = metadata.get("standard_version")
-    if already_ingested(standard_name, standard_version, persist_dir):
-        print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
-        return
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(raw_text)
-    docs = []
-    # Use enumerate to get chunk index
-    for idx, chunk in enumerate(chunks):
-        # Copy metadata and add chunk_id
-        chunk_metadata = (metadata or {}).copy()
-        chunk_metadata['chunk_id'] = idx  # or f"{metadata['filename']}_chunk_{idx}" for uniqueness
-        docs.append(Document(page_content=chunk, metadata=chunk_metadata))
- 
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    vectordb.add_documents(docs)
-    print(f"✅ Ingested {len(docs)} chunks into ChromaDB. Metadata : {chunk_metadata}")
+# ---------------------------
+# Prompt Builder for telecom intents
+# ---------------------------
 
-# ------------------------------------------------------------------------------------------------------------------------
+def build_prompt(intent: str, user_query: str, context: str) -> str:
+    """
+    Build an intent-specific prompt that asks the LLM to generate the final answer.
+    Keep prompts concise but explicit about expectations.
+    """
+    if intent == "analyze_latest":
+        return (
+            f"You are a telecom standards expert.\n"
+            f"User asked: {user_query}\n\n"
+            f"Context (latest standard):\n{context}\n\n"
+            "Please provide a concise technical analysis and key takeaways (bullet points if possible)."
+        )
 
-# 4. Build RAG chain
-def build_rag_chain(persist_dir: str = PATH_TO_VECTORSTORE):
-    llm = AzureChatOpenAI(api_key=OPENAI_API_KEY,
-                      api_version=OPENAI_API_VERSION,
-                      azure_deployment=OPENAI_DEPLOYMENT,
-                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-                      temperature=0)
- 
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})  # cosine similarity
- 
-    system_prompt = (
-    "You are a helpful AI assistant specialized in telecom standards (3GPP and related). "
-    "When the user asks about telecom or standards, use the provided context to answer. "
-    "If the answer is not in the context, but it's still about telecom, say 'I don't know'. "
-    "If the question is general chit-chat or not related to telecom, answer naturally using your own knowledge.\n\n"
-    "Context: {context}"
-)
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
- 
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, combine_docs_chain)
- 
-# ------------------------
-#EXAMPLE of Metadata.....|
-# ------------------------
-'''
-ingest_text("the extracted standards doc file.....", metadata={
-    "filename": "23700-67-100",
-    "standard_name": "3GPP TR 23.700-67",
-    "standard_version": "V1.0.0",
-    "release_date": "2022-01-01"
-})
-'''
+    if intent == "compare_versions" or intent == "compare_standard_versions":
+        return (
+            f"You are a telecom standards expert.\nUser asked: {user_query}\n\n"
+            f"Context (versions to compare):\n{context}\n\n"
+            "Identify major changes, feature differences, and any compatibility or migration notes. Provide a short summary and a concise comparison table."
+        )
+
+    if intent == "compare_standards":
+        return (
+            f"You are a telecom standards expert.\nUser asked: {user_query}\n\n"
+            f"Context (standards):\n{context}\n\n"
+            "Compare purpose, scope, key features, and typical use-cases. Summarize differences and overlaps."
+        )
+
+    if intent == "explain_features":
+        return (
+            f"You are a telecom standards expert.\nUser asked: {user_query}\n\n"
+            f"Context (standard):\n{context}\n\n"
+            "List and explain the main features and their significance. Keep it clear for a technical engineer audience."
+        )
+
+    if intent == "latest_standard":
+        return (
+            f"You are a telecom standards expert.\nUser asked: {user_query}\n\n"
+            f"Context (latest standard):\n{context}\n\n"
+            "Summarize what's new, why it matters, and any high-level implications."
+        )
+
+    # fallback
+    return f"User asked: {user_query}\n\nContext:\n{context}\n\nPlease answer clearly."
+
+# ---------------------------
+# Dispatcher: the main entrypoint
+# ---------------------------
+
+def answer_query(user_query: str, vectordb, rag_chain, llm) -> str:
+    """
+    Orchestrates: classify intent -> call handler -> generate final answer.
+    If intent == "none", call rag_chain to handle general QA (so bot behaves like normal).
+    """
+    intent, params = classify_intent_with_llm(user_query, llm)
+
+    # If the classifier says "none", treat as general query and use the normal RAG chain
+    if intent == "none":
+        # Use RAG chain to respond naturally (RAG should use your vectorstore + LLM)
+        try:
+            result = rag_chain.invoke({"input": user_query})
+            # rag_chain return shape may vary; try common ones
+            if isinstance(result, dict):
+                return result.get("answer") or result.get("text") or json.dumps(result)
+            return str(result)
+        except Exception as e:
+            # As a last resort, ask the LLM directly (no retrieval)
+            fallback_prompt = f"You are a helpful assistant. User asked: {user_query}"
+            resp = llm.invoke(fallback_prompt)
+            return getattr(resp, "content", None) or getattr(resp, "text", None) or str(resp)
+
+    # Telecom intents -> retrieve context through handlers, then ask LLM with intent prompt
+    if intent == "analyze_latest":
+        context = handle_analyze_latest(vectordb, params.get("standard_name"))
+    elif intent == "compare_versions":
+        context = handle_compare_versions(vectordb, params.get("standard_name"), params.get("versions"))
+    elif intent == "compare_standards":
+        # allow classifier to return list under 'standards' or 'versions' sometimes
+        stds = params.get("standards") or params.get("versions")
+        context = handle_compare_standards(vectordb, stds)
+    elif intent == "compare_standard_versions":
+        context = handle_compare_standard_versions(vectordb, params.get("standard_name"), params.get("versions"))
+    elif intent == "explain_features":
+        # versions may be provided in 'versions' array; use first if so
+        version = (params.get("versions") or [None])[0] if params.get("versions") else None
+        context = handle_explain_features(vectordb, params.get("standard_name"), version)
+    elif intent == "latest_standard":
+        context = handle_latest_standard(vectordb)
+    else:
+        # unknown -> treat as general
+        try:
+            result = rag_chain.invoke({"input": user_query})
+            if isinstance(result, dict):
+                return result.get("answer") or result.get("text") or json.dumps(result)
+            return str(result)
+        except Exception:
+            fallback_prompt = f"You are a helpful assistant. User asked: {user_query}"
+            resp = llm.invoke(fallback_prompt)
+            return getattr(resp, "content", None) or getattr(resp, "text", None) or str(resp)
+
+    # Now build intent-specific prompt and get final generation
+    prompt = build_prompt(intent, user_query, context)
+    resp = llm.invoke(prompt)
+    # return content if present
+    return getattr(resp, "content", None) or getattr(resp, "text", None) or str(resp)
+
+# ---------------------------
+# End of pipeline
+# ---------------------------
