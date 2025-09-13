@@ -1,101 +1,155 @@
-# Put this in yest.py - replaces your old get_full_docs
+import os
+from dotenv import load_dotenv
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
+
+
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
+
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
+
+ 
+# 1. Set metadata
+{
+    "filename": "3gpp_standard_v1.pdf",
+    "standard_name": "3GPP",
+    "standard_version": "v1",
+    "release_date": "2022-01-01"
+}
+ 
+# 2. Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment="text-embedding-ada-002",
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
+
+# -------------------------------
+# Build intent classifier
+# -------------------------------
+def build_intent_classifier():
+    # Predefined intents and associated keywords
+    INTENT_KEYWORDS = {
+        "analyze_latest": ["latest", "analyze", "recent", "newest"],
+        "compare_versions": ["compare versions", "version difference", "version changes", "changes between", "differences between versions"],
+        "compare_standards": ["compare standards", "difference between standards", "standards comparison", "vs"],
+        "compare_standard_versions": ["compare", "across versions", "standard versions", "version comparison"],
+        "explain_features": ["give","features", "explain", "describe", "capabilities", "specifications"],
+        "latest_standard": ["latest standard", "newest standard", "most recent standard", "current standard"],
+    }
+
+    class IntentClassifier:
+        def invoke(self, inputs):
+            query = inputs.get("query", "").lower()
+            for intent, keywords in INTENT_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in query:
+                        # Return an object with .content to mimic LLM response
+                        class Response:
+                            def __init__(self, content):
+                                self.content = content
+                        return Response(intent)
+            # Default to "none" if no keywords matched
+            class Response:
+                def __init__(self, content):
+                    self.content = content
+            return Response("none")
+
+    # Return an object with .invoke for compatibility
+    return IntentClassifier()
+
+# classify_intent = build_intent_classifier()
+
+# response = classify_intent.invoke({"query":"Hi"})
+
+from langchain_core.prompts import ChatPromptTemplate
+
+def build_entity_extractor():
+    """
+    Extracts metadata (standard_names, standard_versions, release_date) from user query.
+    Returns JSON with keys: standard_names (list), standard_versions (list), release_date (string/null).
+    If nothing found, lists can be empty and release_date null.
+    """
+    llm = AzureChatOpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        api_version=os.getenv("OPENAI_VERSION"),
+        azure_deployment=os.getenv("OPENAI_DEPLOYMENT"),
+        azure_endpoint=os.getenv("OPENAI_BASE"),
+        temperature=0
+    )
+
+    system_prompt = """You are an entity extractor for telecom standards queries.
+From the user query, extract:
+
+- standard_names: a list of all standard names mentioned (e.g., ["3GPP TR 23.700-67"]).
+- standard_versions: a list of all versions mentioned. Normalize them to start with uppercase 'V' (e.g., "1.0.0" -> "V1.0.0", "v6.0.89" -> "V6.0.89").
+- release_date: the release date if explicitly mentioned (e.g., "2025-04"), else null.
+
+Return a single JSON object with keys: standard_names, standard_versions, release_date.
+If something is not mentioned, lists can be empty and release_date should be null.
+Only return valid JSON."""
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
+
+    return prompt | llm
+
+# entity = build_entity_extractor()
+
+# reswponse = entity.invoke({"query":"please analyze standard 3gpp tr 23.243.12 for me"})
+# print(reswponse.content)
+
 from langchain_chroma import Chroma
-from datetime import datetime
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
 
-def _parse_release_date(meta):
-    """Robust attempt to parse release_date into a datetime for sorting."""
-    rd = (meta or {}).get("release_date") or ""
-    rd = rd.strip()
-    if not rd:
-        return datetime.min
-    # try common formats
-    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
-        try:
-            return datetime.strptime(rd, fmt)
-        except Exception:
-            pass
-    # final fallback: try ISO parse
-    try:
-        return datetime.fromisoformat(rd)
-    except Exception:
-        return datetime.min
+def get_full_docs(filters: dict):
+    """
+    Returns all documents and metadata matching the given filters.
+    Example filter:
+        {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
+    """
+    # Ensure $and operator for multiple metadata
+    if len(filters) > 1:
+        where = {"$and": [{k: v} for k, v in filters.items()]}
+    else:
+        where = filters
 
-def get_full_docs(filters: dict = None, intent: str = None, persist_dir: str = PATH_TO_VECTORSTORE):
-    """
-    Returns list[(doc_text, metadata)] matching filters.
-    - filters: dict or None. If provided, constructs a Chroma `where`.
-    - intent: optional string. If filters missing or returned no results,
-      intent-driven fallback behavior is used:
-        - "analyze_latest" -> return the single latest standard (by release_date)
-        - "compare_versions" -> return two latest versions of one standard (if possible)
-    Backwards-compatible: existing callers that call get_full_docs(filters) still work.
-    """
     vectordb = Chroma(
         collection_name="standards_collection",
         embedding_function=embeddings,
-        persist_directory=persist_dir,
+        persist_directory=PATH_TO_VECTORSTORE,
     )
     collection = vectordb._collection
 
-    # helper to fetch with a where clause, safe wrapper
-    def _collection_get(where_arg=None):
-        try:
-            if where_arg is not None:
-                return collection.get(include=["documents", "metadatas"], where=where_arg)
-            else:
-                return collection.get(include=["documents", "metadatas"])
-        except Exception:
-            # fallback: try a plain get (some versions differ)
-            try:
-                return collection.get(include=["documents", "metadatas"])
-            except Exception:
-                return {"documents": [], "metadatas": []}
+    # Fetch all matching docs
+    results = collection.get(include=["documents", "metadatas"], where=where)
 
-    # 1) If filters provided, try strict retrieval first
-    if filters:
-        if isinstance(filters, dict) and len(filters) > 1:
-            where = {"$and": [{k: v} for k, v in filters.items()]}
-        else:
-            where = filters
-        results = _collection_get(where)
-        docs = results.get("documents", []) or []
-        metas = results.get("metadatas", []) or []
-        if docs and metas:
-            return list(zip(docs, metas))
-        # fall through to fallback behavior if strict filter returned nothing
+    docs = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+    return list(zip(docs, metadatas))
 
-    # 2) No filters or strict filter returned nothing -> fallback based on intent
-    results = _collection_get(None)
-    docs = results.get("documents", []) or []
-    metas = results.get("metadatas", []) or []
-    if not docs or not metas:
-        return []
+# filters = {
+#     "standard_name": "3GPP TR 23.700-67",
+#     "standard_version": "V1.0.0"
+# }
 
-    items = list(zip(docs, metas))
+# all_docs = get_full_docs(filters)
 
-    # analyze_latest -> pick the single latest by release_date
-    if intent == "analyze_latest":
-        items_sorted = sorted(items, key=lambda x: _parse_release_date(x[1]), reverse=True)
-        return [items_sorted[0]] if items_sorted else []
+# for i, (doc, meta) in enumerate(all_docs):
+#     print(f"Doc {i} metadata: {meta}")
+#     print(f"Content snippet: {doc[:300]}...\n")
 
-    # compare_versions -> try to find a standard with >=2 versions; pick its 2 latest;
-    # if none, fall back to two most recent docs overall
-    if intent == "compare_versions":
-        grouped = {}
-        for doc, meta in items:
-            name = meta.get("standard_name") or meta.get("filename") or "UNKNOWN"
-            grouped.setdefault(name, []).append((doc, meta))
 
-        # look for a group with >=2 entries
-        for name, lst in grouped.items():
-            if len(lst) >= 2:
-                lst_sorted = sorted(lst, key=lambda x: _parse_release_date(x[1]), reverse=True)
-                return lst_sorted[:2]
 
-        # fallback: return top 2 overall
-        items_sorted = sorted(items, key=lambda x: _parse_release_date(x[1]), reverse=True)
-        return items_sorted[:2]
+Give the features of 3gpp tr 23.700-67
 
-    # default fallback: return up to a reasonable number so callers don't get overloaded
-    MAX_RETURN = 50
-    return items[:MAX_RETURN]
+02:39 PM
+The context provided does not include specific features of 3GPP TR 23.700-67. It only mentions that the document is a Technical Report developed within the 3GPP framework, focusing on a Study on Energy Efficiency and Energy Saving, Phase 2 (Release 20). The document is intended for future development work and has not been approved for implementation.
+
+If you need detailed features or technical aspects, you would need to refer to the full text of the report or related 3GPP documentation.
