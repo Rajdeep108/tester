@@ -1,237 +1,64 @@
-import os
-import json
-from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain.chains.retrieval import create_retrieval_chain
-from langchain_core.prompts import ChatPromptTemplate
-
-load_dotenv()
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
-OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
-OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
-
-PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
-
-# Define the intents
-INTENTS = {
-    "analyze_latest": "Please analyze the latest standards for me",
-    "compare_versions": "Please compare versions of a standard",
-    "compare_standards": "Please compare two different standards",
-    "compare_standard_versions": "Please compare a standard across two versions",
-    "explain_features": "Explain the features of a standard",
-    "latest_standard": "Which is the latest standard/version",
-}
-
-# Initialize embeddings
-embeddings = AzureOpenAIEmbeddings(
-    api_key=OPENAI_API_KEY,
-    api_version=OPENAI_API_VERSION,
-    azure_deployment="text-embedding-ada-002",
-    azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
+from agents.utils.rag_pipeline import (
+    build_rag_chain,
+    build_intent_entity_extractor,
+    run_intent_query,
+    INTENTS
 )
+from utils.functions import insert_chat_history, get_chat_history
+import json
 
-# -------------------------------
-# Check if already ingested
-# -------------------------------
-def already_ingested(standard_name, standard_version, persist_dir):
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    results = vectordb.get(
-        where={
-            "$and": [
-                {"standard_name": standard_name},
-                {"standard_version": standard_version}
-            ]
-        }
-    )
-    return len(results['ids']) > 0
+router = APIRouter()
 
-# -------------------------------
-# Ingest text into ChromaDB
-# -------------------------------
-def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
-    standard_name = metadata.get("standard_name")
-    standard_version = metadata.get("standard_version")
+rag_chain = build_rag_chain()
+intent_entity_extractor = build_intent_entity_extractor()
 
-    if already_ingested(standard_name, standard_version, persist_dir):
-        print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
-        return
+class ChatRequest(BaseModel):
+    question: str
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(raw_text)
+class ChatResponse(BaseModel):
+    answer: str
 
-    docs = []
-    for idx, chunk in enumerate(chunks):
-        chunk_metadata = (metadata or {}).copy()
-        chunk_metadata['chunk_id'] = idx
-        docs.append(Document(page_content=chunk, metadata=chunk_metadata))
+class ChatHistoryItem(BaseModel):
+    id: int
+    timestamp: str
+    question: str
+    answer: str
 
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-    vectordb.add_documents(docs)
+@router.post("/chat/", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    try:
+        # Step 1: Extract intent + entities
+        parsed = intent_entity_extractor.invoke({"query": request.question}).content
+        parsed_json = json.loads(parsed)
 
-    print(f"✅ Ingested {len(docs)} chunks into ChromaDB. Metadata : {chunk_metadata}")
+        intent = parsed_json.get("intent", "none")
 
-# -------------------------------
-# Build main RAG chain
-# -------------------------------
-def build_rag_chain(persist_dir: str = PATH_TO_VECTORSTORE):
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
-    )
+        if intent in INTENTS:
+            # Intent-aware RAG
+            answer = run_intent_query(request.question, parsed_json)
+        else:
+            # Normal RAG
+            result = rag_chain.invoke({"input": request.question})
+            answer = result["answer"]
 
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
+        insert_chat_history(request.question, answer)
+        return ChatResponse(answer=answer)
 
-    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    system_prompt = (
-        "You are a helpful AI assistant specialized in telecom standards (3GPP and related). "
-        "When the user asks about telecom or standards, use the provided context to answer. "
-        "If the answer is not in the context, but it's still about telecom, say 'I don't know'. "
-        "If the question is general chit-chat or not related to telecom, answer naturally using your own knowledge.\n\n"
-        "Context: {context}"
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    return create_retrieval_chain(retriever, combine_docs_chain)
-
-# -------------------------------
-# Build intent + entity extractor
-# -------------------------------
-def build_intent_entity_extractor():
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
-    )
-
-    system_prompt = """You are an intent + entity extractor.
-1. Classify the user query into one of the following intents:
-- analyze_latest
-- compare_versions
-- compare_standards
-- compare_standard_versions
-- explain_features
-- latest_standard
-If none apply, return "none".
-
-2. Extract if available:
-- standard_name
-- standard_version
-- release_date
-
-Return ONLY valid JSON like:
-{"intent": "...", "standard_name": "...", "standard_version": "...", "release_date": "..."}"""
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{query}")
-    ])
-
-    return prompt | llm
-
-# -------------------------------
-# Get latest standard from DB
-# -------------------------------
-def get_latest_standard_from_db(standard_name: str = None, persist_dir: str = PATH_TO_VECTORSTORE):
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-
-    results = vectordb.get(include=["metadatas"])
-    metadatas = results["metadatas"]
-
-    if standard_name:
-        metadatas = [m for m in metadatas if m.get("standard_name") == standard_name]
-
-    if not metadatas:
-        return None
-
-    latest = max(metadatas, key=lambda m: m.get("release_date", ""))
-    return {
-        "standard_name": latest.get("standard_name"),
-        "standard_version": latest.get("standard_version"),
-        "release_date": latest.get("release_date")
-    }
-
-# -------------------------------
-# Run intent-aware RAG query
-# -------------------------------
-def run_intent_query(user_question: str, parsed_json: dict, persist_dir: str = PATH_TO_VECTORSTORE):
-    llm = AzureChatOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_deployment=OPENAI_DEPLOYMENT,
-        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
-        temperature=0
-    )
-
-    intent = parsed_json.get("intent", "none")
-    standard_name = parsed_json.get("standard_name")
-    standard_version = parsed_json.get("standard_version")
-    release_date = parsed_json.get("release_date")
-
-    filters = {}
-    if standard_name: filters["standard_name"] = standard_name
-    if standard_version: filters["standard_version"] = standard_version
-    if release_date: filters["release_date"] = release_date
-
-    # Edge case: analyze_latest but no filters
-    if intent == "analyze_latest" and not filters:
-        latest_info = get_latest_standard_from_db(standard_name, persist_dir)
-        if latest_info:
-            filters.update({k: v for k, v in latest_info.items() if v})
-
-    vectordb = Chroma(
-        collection_name="standards_collection",
-        embedding_function=embeddings,
-        persist_directory=persist_dir,
-    )
-
-    retriever = vectordb.as_retriever(
-        search_kwargs={"k": 3},
-        filter=filters if filters else None
-    )
-
-    system_prompt = f"Intent: {intent}. Use the provided context to answer.\n\nContext: {{context}}"
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("human", "{input}"),
-    ])
-
-    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
-    intent_chain = create_retrieval_chain(retriever, combine_docs_chain)
-
-    result = intent_chain.invoke({"input": user_question})
-    return result["answer"]
+@router.get("/chat-history/", response_model=list[ChatHistoryItem])
+async def chat_history():
+    rows = get_chat_history()
+    return [
+        ChatHistoryItem(
+            id=row[0],
+            timestamp=row[1],
+            question=row[2],
+            answer=row[3]
+        )
+        for row in rows
+    ]
