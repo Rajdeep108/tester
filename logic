@@ -1,18 +1,28 @@
-from langchain_chroma import Chroma
+from langchain.vectorstores import Chroma
+from agents.utils.rag_pipeline import PATH_TO_VECTORSTORE, embeddings
 
-def get_filtered_retriever(filters: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
+def get_full_docs(filters: dict):
     """
-    Returns a Chroma retriever that only fetches documents matching the provided metadata.
-    Example filters:
+    Returns all documents and metadata matching the given filters.
+    Example filter:
         {"standard_name": "3GPP TR 23.700-67", "standard_version": "V1.0.0"}
     """
+    # Ensure $and operator for multiple metadata
+    if len(filters) > 1:
+        where = {"$and": [{k: v} for k, v in filters.items()]}
+    else:
+        where = filters
+
     vectordb = Chroma(
         collection_name="standards_collection",
         embedding_function=embeddings,
-        persist_directory=persist_dir,
+        persist_directory=PATH_TO_VECTORSTORE,
     )
+    collection = vectordb._collection
 
-    return vectordb.as_retriever(
-        search_kwargs={"k": 3},
-        filter=filters if filters else None
-    )
+    # Fetch all matching docs
+    results = collection.get(include=["documents", "metadatas"], where=where)
+
+    docs = results.get("documents", [])
+    metadatas = results.get("metadatas", [])
+    return list(zip(docs, metadatas))
