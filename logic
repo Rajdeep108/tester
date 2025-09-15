@@ -1,452 +1,138 @@
-8import asyncio
 import os
-import httpx
-import sqlite3
-from datetime import datetime
-from fastapi import APIRouter
-from mcp.server.fastmcp import FastMCP, Context
-from bs4 import BeautifulSoup  # For parsing HTML page
-from .tools.notifier_tool import send_notification
-import json
-from pathlib import Path
-
-from pydantic import BaseModel
-
 from dotenv import load_dotenv
-from llm.llm_endpoints import chat_completion
-from langsmith.run_helpers import traceable 
-
-from fastapi import WebSocket, WebSocketDisconnect
-
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-c"
-
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain_core.prompts import ChatPromptTemplate
 
 
 load_dotenv()
-# Websocket manager................
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: set[WebSocket] = set()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom_F\Telecom\backend\vectorstores"
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
+ 
+# 1. Set metadata
+{
+    "filename": "3gpp_standard_v1.pdf",
+    "standard_name": "3GPP",
+    "standard_version": "v1",
+    "release_date": "2022-01-01"
+}
+ 
+# 2. Initialize embeddings
+embeddings = AzureOpenAIEmbeddings(api_key=OPENAI_API_KEY,
+                      api_version=OPENAI_API_VERSION,
+                      azure_deployment="text-embedding-ada-002",
+                      azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT)
 
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections.copy():
-            try:
-                await connection.send_json(message)
-            except Exception:
-                self.disconnect(connection)
-
-manager = ConnectionManager()
-router = APIRouter()
-mcp = FastMCP("WebsiteMonitor")
-
-DB_PATH = r"C:\Users\342534\Desktop\backend\backend\telecom_ai.db"
-BASE_URL = "https://www.3gpp.org/ftp/specs/archive/23_series/23.002"
-CONFIG_PATH = Path(r"C:\Users\342534\Desktop\backend\backend\agents\config\crawler_config.json")
-
-RECIPIENT_EMAILS = [
-    "342534@nttdata.com",
-    "harshitanagaraj.guled@nttdata.com",
-    "neelambuz.singh@nttdata.com"
-]
-
-LATEST_STATUS = ""
-
-def update_latest_status(msg: str):
-    global LATEST_STATUS
-    LATEST_STATUS = msg
-
-# Update print statements to also call this
-def print_and_store(msg: str):
-    update_latest_status(msg)
-    # Broadcast log message to websocket clients
-    try:
-        import asyncio
-        asyncio.create_task(manager.broadcast({"type": "log", "data": msg}))
-    except Exception:
-        pass
-
-async def broadcast_status():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    cfg = read_crawler_config()
-    data = {
-        "filename": row[0] if row else None,
-        "url": row[1] if row else None,
-        "status": row[2] if row else None,
-        "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
-    }
-    await manager.broadcast({"type": "status", "data": data})
-
-# --- Config helpers ---
-def read_crawler_config():
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r") as f:
-            data = json.load(f)
-            data.setdefault("crawler_active", False)
-            data.setdefault("crawler_frequency", 10)
-            return data
-    else:
-        return {"crawler_active": False, "crawler_frequency": 10}
-
-crawler_wakeup_event = asyncio.Event()
-def write_crawler_config(active: bool = None, frequency: int = None):
-    cfg = read_crawler_config()
-    orig_active = cfg.get("crawler_active", False)
-    if active is not None:
-        cfg["crawler_active"] = active
-    if frequency is not None:
-        cfg["crawler_frequency"] = frequency
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f)
-    # Wake up the monitor if toggling active or inactive
-    if active is not None and active != orig_active:
-        try:
-            crawler_wakeup_event.set()
-        except Exception:
-            pass
-
-# ---------------------------
-# Database Helpers
-# ---------------------------
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS files (
-               id INTEGER PRIMARY KEY,
-               filename TEXT UNIQUE,
-               url TEXT,
-               status TEXT,
-               last_checked TEXT
-           )"""
-    )
-    conn.commit()
-    conn.close()
-
-def add_file(filename: str, url: str, status: str):
-    current_time = datetime.now().isoformat() 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """INSERT INTO files (filename, url, status, last_checked)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(filename) DO UPDATE SET
-               status=excluded.status,
-               last_checked=excluded.last_checked""",
-        (filename, url, status,current_time)
-    )
-    conn.commit()
-    conn.close()
-
-def get_latest_file():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    return {"filename": row[0], "url": row[1], "last_checked": row[2]} if row else None
-# ---------------------------
-# MCP Tools
-# ---------------------------
-
-@traceable
-@mcp.tool()
-async def fetch_url(url: str, ctx: Context) -> str:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        return resp.text
-
-@traceable
-@mcp.tool()
-def parse_version(html: str, ctx: Context):
-    """Parse the latest .zip file in the folder page by uploaded date"""
-    soup = BeautifulSoup(html, "html.parser")
-    files = []
-    # Each file entry is a <tr> inside <tbody>
-    for row in soup.select("tbody tr"):
-        cols = row.find_all("td")
-        if len(cols) < 5:
-            continue
-        # The filename link is the third <td> (index 2)
-        a_tag = cols[2].find("a", href=True)
-        if not a_tag or not a_tag["href"].endswith(".zip"):
-            continue
-        filename = os.path.basename(a_tag["href"])
-        # The date is the fourth <td> (index 3)
-        date_str = cols[3].get_text(strip=True)
-        try:
-            # Try parsing date, e.g. '2025/06/03 17:49'
-            date_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
-        except Exception:
-            continue  # skip if date not parsable
-        files.append((filename, date_obj))
-    if not files:
-        return None
-    # Sort files by date (descending)
-    files.sort(key=lambda x: x[1], reverse=True)
-    # Return the filename of the latest file
-    return files[0][0]
-
-@traceable
-@mcp.tool()
-def compare_versions(old: str, new: str, ctx: Context):
-    if old != new:
-        return "new version"
-    return "same version"
-
-# ---------------------------
-# Agent Logic
-# ---------------------------
-
-@traceable(run_type="llm")
-def should_crawl_reasoning_llm(last_checked:str , last_file: str, frequency: int,current_time:str) -> bool:
-    """
-    Lightweight agentic reasoning: Should we crawl now?
-    Uses LLM to decide, answer must start with 'yes' or 'no'.
-    """
-    prompt = (
-        f"You are an autonomous standards monitoring agent for 3GPP. "
-        f"Your goal is to efficiently detect updates to the website: "
-        f"- Last checked: {last_checked}\n"
-        f"Current time: {current_time}\n"
-        f"- Last file seen: {last_file}\n"
-        f"- Check frequency (seconds): {frequency}\n"
-        "You must decide whether to crawl the website NOW. "
-        "Crawling too often may waste resources, but missing updates is worse. "
-        "Consider the following:\n"
-        "- If it has been a long time since last check, crawling is more urgent.\n"
-        "- If the last file has not changed for several checks, occasional crawling is still needed to catch updates.\n"
-        "- If frequency is low but there is an important pattern (e.g., frequent updates), crawling may be justified.\n"
-        "Your decision should balance efficiency and vigilance. "
-        "Reply ONLY with 'yes' or 'no' and a short reason. Never be stuck rejecting every crawl."
-    )
-    resp = chat_completion(
-        user_prompt=prompt,
-        system_instruction=(
-            "Decide if the agent should crawl now. "
-            "Always reply with 'yes' or 'no' and a brief reason. "
-            "STRICTLY check If time since last check(in seconds) >= frequency (in seconds), you must definitely reply 'yes'."
-            "Do NOT reject crawling indefinitely; at least crawl occasionally. "
-
-        ))
-    # Only the yes/no part matters for action!
-    return resp.strip().lower().startswith('yes')
-
-@traceable(run_type="llm")
-async def monitor_site():
-    ctx = Context()
-    html = await fetch_url(BASE_URL, ctx)
-    latest_file = os.path.basename(parse_version(html, ctx))
-    if not latest_file:
-        print(f"❌ No .zip files found at {BASE_URL}")
-        print_and_store("❌ No .zip files found at {BASE_URL}")
-        return
-
-    last_seen = get_latest_file()
-    last_filename = os.path.basename(last_seen["filename"]) if last_seen else None
-    decision = compare_versions(last_filename or "", latest_file, ctx)
-
-    file_url = BASE_URL + latest_file
-    add_file(latest_file, file_url, decision)
-    await broadcast_status()
-
-    if decision == "new version":
-        print(f"🚀 New file detected: {latest_file}")
-        print_and_store(f"🚀 New file detected: {latest_file}")
-        await asyncio.sleep(1.5)
-
-        prompt = f"Given the filename '{latest_file}', what telecom topic or area might this document relate to in 3GPP v23 standards ?"
-        summary = chat_completion(
-            user_prompt=prompt,
-            system_instruction="Infer the likely scope or topic based on the filename."
-        )
-        print_and_store("Predicting Possible Features and Scopes........")
-        await asyncio.sleep(1.5)
-        #3. Send email notification to all recipients
-        subject = f"New 3GPP File Available: {latest_file}"
-        content = f"""
-        <p>Hello,</p>
-        <p>A new standard file <b>{latest_file}</b> is now available at:</p>
-        <a href="{file_url}">{file_url}</a>
-        <p><b>Possible Scope/ Inference:</b><br>{summary}</p>
-        <p>Best regards,<br>Your Standards Monitor Agent</p>
-        """
-        for email in RECIPIENT_EMAILS:
-            send_notification(email, subject, content)
-        print_and_store("Email Notification sent!")
-    else:
-        print(f"No new file. Current latest: {latest_file}")
-        print_and_store(f"No new file. Current latest: {latest_file}")
-
-# ---------------------------
-# Background Task
-# ---------------------------
-
-last_active = None
-async def background_monitor():
-    global last_active
-    while True:
-        cfg = read_crawler_config()
-        freq = cfg["crawler_frequency"]
-        if cfg["crawler_active"]:
-            last = get_latest_file()
-            last_checked = last['last_checked'] if last and last['last_checked'] else "never"
-            last_file = last['filename'] if last else "none"
-            # --- AGENTIC DECISION STEP ---
-
-            now = datetime.now().isoformat()  # or your preferred format
-            should_crawl = should_crawl_reasoning_llm(
-                last_checked=last_checked,
-                current_time=now,
-                last_file=last_file,
-                frequency=freq
-            )
-            if should_crawl:
-                try:
-                    await monitor_site()
-                except Exception as e:
-                    print(f"❌ Too many requests to website: {e}")
-                    print_and_store(f"Website is loading....")
-            else:
-                print("Agentic Reasoning: Decided not to crawl this cycle.")
-                print_and_store("Agentic Reasoning: Decided not to crawl this cycle.")
-        else:
-            if last_active != False:
-                print("🔌 Crawler is inactive.")
-                print_and_store("🔌 Crawler is inactive.")
-        last_active = cfg["crawler_active"]
-
-        try:
-            crawler_wakeup_event.clear()
-            await asyncio.wait_for(crawler_wakeup_event.wait(), timeout=freq)
-            continue
-        except asyncio.TimeoutError:
-            pass
-
-# ---------------------------
-# FastAPI Endpoints
-# ---------------------------
-
-@router.get("/monitor/agent")
-async def get_agent_status():
-    cfg = read_crawler_config()
-    return {
-        "active": cfg["crawler_active"],
-        "frequency": cfg["crawler_frequency"],
+# -------------------------------
+# Build intent classifier
+# -------------------------------
+def build_intent_classifier():
+    # Predefined intents and associated keywords
+    INTENT_KEYWORDS = {
+        "analyze_latest": ["latest", "analyze", "recent", "newest"],
+        "compare_versions": ["compare versions", "version difference", "version changes", "changes between", "differences between versions"],
+        "compare_standards": ["compare standards", "difference between standards", "standards comparison", "vs"],
+        "compare_standard_versions": ["compare", "across versions", "standard versions", "version comparison"],
+        "explain_features": ["give","features", "explain", "describe", "capabilities", "specifications"],
+        "latest_standard": ["latest standard", "newest standard", "most recent standard", "current standard"],
     }
 
-class AgentToggleRequest(BaseModel):
-    active: bool
+    class IntentClassifier:
+        def invoke(self, inputs):
+            query = inputs.get("query", "").lower()
+            for intent, keywords in INTENT_KEYWORDS.items():
+                for kw in keywords:
+                    if kw in query:
+                        # Return an object with .content to mimic LLM response
+                        class Response:
+                            def __init__(self, content):
+                                self.content = content
+                        return Response(intent)
+            # Default to "none" if no keywords matched
+            class Response:
+                def __init__(self, content):
+                    self.content = content
+            return Response("none")
 
-@router.post("/monitor/agent/toggle")
-async def toggle_agent(body: AgentToggleRequest):
-    write_crawler_config(active=body.active)
-    # Send a log message to all clients
-    msg = "🔌 Crawler activated." if body.active else "🔌 Crawler deactivated."
-    print_and_store(msg)
-    await broadcast_status()
-    return {"success": True, "active": body.active}
+    # Return an object with .invoke for compatibility
+    return IntentClassifier()
 
-class AgentFrequencyRequest(BaseModel):
-    frequency: int  # seconds
+# classify_intent = build_intent_classifier()
 
-@router.post("/agent/{id}/frequency")
-async def set_frequency(id: int, payload: dict):
-    new_freq = payload.get("frequency")
-    write_crawler_config(frequency=new_freq)
-    await broadcast_status()
-    return {"success": True}
+# response = classify_intent.invoke({"query":"Hi"})
 
-@router.get("/monitor/status")
-async def monitor_status():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    cfg = read_crawler_config()
-    return [{
-        "filename": row[0] if row else None,
-        "url": row[1] if row else None,
-        "status": row[2] if row else None,
-        "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
-    }]
+from langchain_core.prompts import ChatPromptTemplate
 
-@router.get("/monitor/log")
-def get_latest_log():
-    return {"message": LATEST_STATUS}
+def build_entity_extractor():
+    """
+    Extracts metadata (standard_names, standard_versions, release_date) from user query.
+    Returns JSON with keys: standard_names (list), standard_versions (list), release_date (string/null).
+    If nothing found, lists can be empty and release_date null.
+    """
+    llm = AzureChatOpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        api_version=os.getenv("OPENAI_VERSION"),
+        azure_deployment=os.getenv("OPENAI_DEPLOYMENT"),
+        azure_endpoint=os.getenv("OPENAI_BASE"),
+        temperature=0
+    )
 
-@router.websocket("/ws/monitor")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()  # Optional: keep alive
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+    system_prompt = """You are an entity extractor for telecom standards queries.
+From the user query, extract:
 
-# ---------------------------
-# Standalone MCP
-# ---------------------------
+- standard_names: a list of all standard names mentioned (e.g., ["3GPP TR 23.700-67"]).
+- standard_versions: a list of all versions mentioned. Normalize them to start with uppercase 'V' (e.g., "1.0.0" -> "V1.0.0", "v6.0.89" -> "V6.0.89").
+- release_date: the release date if explicitly mentioned (e.g., "2025-04"), else null.
 
-if __name__ == "__main__":
-    init_db()
-    asyncio.run(background_monitor())
-    # For MCP CLI: mcp.run("stdio")
+Return a single JSON object with keys: standard_names, standard_versions, release_date.
+If something is not mentioned, lists can be empty and release_date should be null.
+Only return valid JSON."""
 
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{query}")
+    ])
 
+    return prompt | llm
 
+entity = build_entity_extractor()
 
+reswponse = entity.invoke({"query":"please analyze standard 3gpp tr 23.243.12 for me"})
+print(reswponse.content)
 
-main.py:
+from langchain_chroma import Chroma
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-from contextlib import asynccontextmanager
-import threading
+def get_full_docs(query: str, filters: dict = None, top_k: int = 20):
+    """
+    Returns the top_k most relevant document chunks for the query, filtered by metadata if provided.
+    Output: list of (doc_content, metadata) tuples.
+    """
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=PATH_TO_VECTORSTORE,
+    )
+    # Perform vector search + metadata filter
+    results = vectordb.similarity_search(
+        query=query,
+        k=top_k,
+        filter=filters
+    )
+    # Format output as list of tuples
+    return [(doc.page_content, doc.metadata) for doc in results]
 
-from utils import login
-from agents import monitoring_agent
-from agents.monitoring_agent import init_db, background_monitor, mcp
-from DocumentUpload import document_uploader
-from agents import ai_assistant
+filters = {
+    "standard_version": ["V1.0.0"]
+}
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    asyncio.create_task(background_monitor())
-    threading.Thread(target=lambda: mcp.run("stdio"), daemon=True).start()
-    yield
+# all_docs = get_full_docs(query="Energy consumption in v0.3.0",filters=filters)
 
-app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8081", "http://localhost:8080", "http://localhost:8080/workflows", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(login.router)
-app.include_router(monitoring_agent.router)
-app.include_router(document_uploader.router)
-app.include_router(ai_assistant.router)
-
+# for i, (doc, meta) in enumerate(all_docs):
+#     print(f"Doc {i} metadata: {meta}")
+#     print(f"Content snippet: {doc[:300]}...\n")
