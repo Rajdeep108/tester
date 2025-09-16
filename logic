@@ -1,55 +1,11 @@
-Objective
-We aim to develop System powered by Agentic-AI, utilizing a multi-agent architecture. This system will be a collaborative platform built on top of SharePoint, provide automated monitoring of SDO websites with notifications, and enable users to easily query standards and gain insights through a chat assistant powered by  RAG.
+Centralized Access: All standards in one place with SharePoint integration
 
+Proactive Monitoring: Automated crawler detects new standard releases
 
-Key Features
-Automated Standards Document Monitoring
-Impact Analysis & Comparison .
-AI-Driven  Summarizations.
-Real time Notifications & Alerts(Teams & Outlook)
-AI powered Search & Retrieval(Chatbot)
-Centralized Knowledge Repository(SharePoint)
-Collaborative Review & Annotations 
+AI-Powered Insights: Summaries, requirement extraction & chatbot search
 
+Real-Time Collaboration: Notifications in Teams & Outlook for multi-team workflows
 
-Input
-Telecom standards documents (DOC, DOCX)
+Faster Decisions: Reduced manual effort, quicker understanding of updates
 
-
-
-Output
-AI-powered insights, summaries and query assistance. UI for file-management in sharepoint and Crawler to monitor new standard releases.
-
-Solution
-The web app leverages Python FastAPI backend and React frontend for seamless user experience. An AI-powered agentic framework extracts metadata, performs semantic and text-based comparisons, and automates impact analysis on old vs new standards. A dedicated crawler agent enables real-time monitoring of SDO or allows users to manually upload new documents. Automated notifications keep all stakeholders informed with timely impact analysis on updated standards. Additionally, users can easily query standards and gain actionable insights through an AI-powered chat assistant (RAG-enabled).
-
-
-Tech Stack
-Backend: Python (Fast API),
-Frontend: React, 
-Database: SQLite3, 
-VectorDB: Chroma DB, 
-LLM: OpenAI GPT-4 o (API),
-Tools:  LangChain, SendGrid, power automate, SharePoint, FastMCP., Langsmith
-
-
-this is old benefits:
-
-Benefits
-✓ Automated Management: Ensures all standards are versioned
-
-✓ Time Savings: Reduces manual document tracking
-
-✓ AI-Powered Insights: Instant semantic diffing and impact analysis
-
-✓ User-Friendly: Simple upload, dashboard, and chat interface
-
-✓ Secure & Scalable: Enforced access control and seamless SharePoint integration
-
-✓ End-to-End Audit Trail: Full version history with stakeholder notifications
-
-
-i want new benefits acc to the data... also tell any other things to be added....
-
-
-
+Scalable Foundation: Modular design, ready for future enterprise use
