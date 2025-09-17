@@ -1,123 +1,30 @@
-from fastapi import Query
-from fastapi.responses import JSONResponse
-
-@router.get("/api/get-file-content")
+@router.get("/api/sharepoint-file-content")
 def get_file_content(filename: str = Query(...)):
-    """
-    Returns the full text content of a validated SharePoint file.
-    """
     file_path = os.path.join(SHAREPOINT_DIR, filename)
     if not os.path.isfile(file_path):
-        return JSONResponse(status_code=404, content={"error": "File not found."})
+        return {"error": "File not found"}
 
     ext = os.path.splitext(file_path)[1].lower()
-    try:
-        if ext == ".docx":
-            content = read_docx(file_path)
-        elif ext == ".doc":
-            content = read_doc(file_path)
-        else:
-            return JSONResponse(status_code=400, content={"error": "Unsupported file type."})
-        
-        return {"content": content}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Could not read file: {str(e)}"})
+    if ext == ".docx":
+        content = read_docx(file_path)
+    elif ext == ".doc":
+        content = read_doc(file_path)
+    else:
+        return {"error": "Unsupported file type"}
 
-
-          -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
-
-import React, { useState, useEffect } from "react";
-import { X, Download } from "lucide-react";
-import { Button } from "@/components/ui/button";
-
-export function WordViewerModal({
-  open,
-  onClose,
-  filename,
-  downloadUrl
-}: {
-  open: boolean;
-  onClose: () => void;
-  filename: string;
-  downloadUrl: string;
-}) {
-  const [content, setContent] = useState<string>("Loading...");
-  const [loading, setLoading] = useState<boolean>(true);
-
-  useEffect(() => {
-    if (open && filename) {
-      setLoading(true);
-      fetch(`http://localhost:8000/api/get-file-content?filename=${encodeURIComponent(filename)}`)
-        .then(res => res.json())
-        .then(data => {
-          setContent(data.content || "No content found.");
-          setLoading(false);
-        })
-        .catch(err => {
-          console.error(err);
-          setContent("Error loading content.");
-          setLoading(false);
-        });
+    return {
+        "filename": filename,
+        "content": content
     }
-  }, [open, filename]);
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed z-50 inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white dark:bg-gray-900 rounded-2xl w-11/12 max-w-4xl p-6 shadow-2xl relative flex flex-col max-h-[80vh]">
-        <button
-          className="absolute top-3 right-3 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 p-1"
-          onClick={onClose}
-        >
-          <X className="w-6 h-6 text-gray-700 dark:text-gray-200" />
-        </button>
-        <div className="flex justify-between items-center mb-3">
-          <h3 className="font-bold text-xl text-gray-800 dark:text-gray-100">{filename}</h3>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.open(downloadUrl, "_blank")}
-          >
-            <Download className="w-4 h-4 mr-1" />
-            Download
-          </Button>
-        </div>
-        <div className="overflow-y-auto flex-1 border border-gray-200 dark:border-gray-700 p-4 rounded-lg bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 whitespace-pre-wrap leading-relaxed text-sm">
-          {loading ? "Loading content..." : content}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 
 
-*******************************************************************************************************************************************
+useEffect(() => {
+  if (!viewerFilename) return;
 
-  <Button
-  variant="ghost"
-  size="icon"
-  onClick={() => {
-    setViewerFilename(file.renamed_filename || file.filename);
-    setViewerDownloadUrl(file.download_url);
-    setViewerOpen(true);
-  }}
->
-  <Eye className="h-4 w-4 text-blue-500" />
-</Button>
-
-
-  const [viewerOpen, setViewerOpen] = useState(false);
-const [viewerFilename, setViewerFilename] = useState("");
-const [viewerDownloadUrl, setViewerDownloadUrl] = useState("");
-
-
-<WordViewerModal
-  open={viewerOpen}
-  onClose={() => setViewerOpen(false)}
-  filename={viewerFilename}
-  downloadUrl={viewerDownloadUrl}
-/>
+  setViewerContent("Loading content...");
+  fetch(`http://localhost:8000/api/sharepoint-file-content?filename=${encodeURIComponent(viewerFilename)}`)
+    .then(res => res.json())
+    .then(data => setViewerContent(data.content || "No content available."))
+    .catch(err => setViewerContent("Failed to load content."));
+}, [viewerFilename]);
