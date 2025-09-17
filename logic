@@ -237,10 +237,12 @@ def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = No
     except Exception as e:
         return {"error": f"Could not list SharePoint files: {str(e)}"}
 
+
 from fastapi import Query
 @router.get("/api/sharepoint-files")
 def list_sharepoint_files():
     return _get_sharepoint_files_structured(limit=None)  # will return all files
+# -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 @router.post("/api/validate")
 def validate_file(req: ValidateRequest):
@@ -384,3 +386,27 @@ def list_validated():
 # @router.get("/api/list-sharepoint")
 # def list_sharepoint():
 #     return {"files": os.listdir(SHAREPOINT_DIR)}
+
+
+
+output---------------------------------------------------------------------------------------------
+
+{
+  "files": [
+    {
+      "standard": "3GPP TR 23.700-67",
+      "version": "V0.3.0",
+      "releaseDate": "2025-08",
+      "uploadedBy": "Rajdeep",
+      "size": "2975.7 KB",
+      "open_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V0.3.0_2025-08%23%40.docx",
+      "download_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V0.3.0_2025-08%23%40.docx"
+    },
+    {
+      "standard": "3GPP TR 23.700-67",
+      "version": "V1.0.0",
+      "releaseDate": "2025-09",
+      "uploadedBy": "Rajdeep",
+      "size": "2977.98 KB",
+      "open_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V1.0.0_2025-09%23%40.docx",
+ 
