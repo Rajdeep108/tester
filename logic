@@ -1,3 +1,173 @@
+from fastapi import APIRouter, File, UploadFile, HTTPException
+from pydantic import BaseModel
+from typing import List
+import os
+import shutil
+from docx import Document  # for .docx parsing
+import re
+import docx2txt
+import doc2txt
+
+from agents.utils.rag_pipeline import ingest_text,already_ingested,PATH_TO_VECTORSTORE
+
+router = APIRouter()
+
+# --- Folder paths ---
+UPLOAD_DIR = "temp/uploads"
+VALIDATED_DIR = "Validated_docs"
+SHAREPOINT_DIR = r"C:\Users\342534\NTT DATA North America\GenAI CoE India - Standards"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(VALIDATED_DIR, exist_ok=True)
+os.makedirs(SHAREPOINT_DIR, exist_ok=True)
+
+# --- Validation ---
+# Detect "3GPP TS/TR 23.982/name" in any case (e.g., "3GPP", "3gpp", "3Gpp")
+STANDARD_REGEX = re.compile(r"\b3GPP\s+(TR|TS)\s+[\d\.]+(?:-\d+)?\b", re.IGNORECASE)
+# Detect versions like:
+# v1.0.0, V15.2.0, v2.3, v10.12, v0.3.0 etc.
+VERSION_REGEX = re.compile(r"\b[vV]\s*\d+(?:\.\d+){1,3}\b")
+DATE_REGEX = re.compile(r"\b[Vv]\s*\d+(?:\.\d+){1,3}\b\s*\((\d{4}-\d{2})\)")
+
+
+def read_docx(file_path: str) -> str:
+    """
+    Extract all text from a .docx file, including cover pages.
+    docx2txt is better than python-docx for tables, headers, and formatted text.
+    """
+    try:
+        text = docx2txt.process(file_path) or ""
+        return text
+    except Exception as e:
+        print(f"Error reading .docx file: {e}")
+        return ""
+
+
+def read_doc(file_path: str) -> str:
+    """
+    Extract all text from a legacy .doc file.
+    textract uses antiword or other backends to read old Word files.
+    """
+    try:
+        text = doc2txt.extract_text(file_path)
+        return text
+    except Exception as e:
+        print(f"Error reading .doc file: {e}")
+        return ""
+
+def validate_document(file_path: str) -> (bool, str): # type: ignore
+    try:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == ".docx":
+            content = read_docx(file_path)
+        elif ext == ".doc":
+            content = read_doc(file_path)  # fallback for .doc
+        else:
+            return False, "Unsupported file format."
+
+        # --- Regex Validation ---
+        if not STANDARD_REGEX.search(content):
+            return False, "File rejected: Missing '3GPP' standard reference."
+        
+        if not VERSION_REGEX.search(content):
+            return False, "File rejected: Missing version pattern like v1.0.0."
+
+        return True, "Document meets 3GPP validation criteria."
+    except Exception as e:
+        return False, f"File rejected: Could not read file. {str(e)}"
+
+# --- Upload Endpoint ---
+@router.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".doc", ".docx"]:
+        raise HTTPException(status_code=400, detail="File rejected: Only .doc or .docx files are allowed.")
+
+    file_location = os.path.join(UPLOAD_DIR, file.filename)
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {
+        "filename": file.filename,
+        "message": "Uploaded successfully!"
+    }
+
+
+# --- Validation Endpoint ---
+class ValidateRequest(BaseModel):
+    filename: str
+
+
+# --- User symbol mapping ---
+USER_SYMBOLS = {
+    "Rajdeep": "@",
+    "Harshita": "*",
+    "Neelambuz": "%"   # replace this value per user’s local code
+}
+CURRENT_USER = "Rajdeep" 
+
+
+def rename_with_metadata(validated_path: str, content: str, original_ext: str) -> str:
+    """
+    Rename a validated file to: <StandardName>_<Version>_<ReleaseDate>#<UserSymbol>.<ext>
+    Falls back to 'UNKNOWN' if any part is missing.
+    """
+    try:
+        # --- Extract metadata ---
+        standard_match = STANDARD_REGEX.search(content or "")
+        standard_name = standard_match.group(0).upper() if standard_match else "UNKNOWN"
+
+        version_date_match = DATE_REGEX.search(content or "")
+        if version_date_match:
+            version = version_date_match.group(0).split()[0].upper()
+            release_date = version_date_match.group(1)
+        else:
+            version_match = VERSION_REGEX.search(content or "")
+            version = version_match.group(0).upper() if version_match else "UNKNOWN"
+            release_date = "UNKNOWN"
+
+        # --- Add user code ---
+        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
+
+        # --- Build new filename ---
+        new_filename = f"{standard_name}_{version}_{release_date}#{user_symbol}{original_ext}"
+
+        # --- Rename file safely ---
+        new_path = os.path.join(VALIDATED_DIR, new_filename)
+        os.rename(validated_path, new_path)
+
+        return new_filename
+    except Exception as e:
+        # In case of ANY unexpected issue, rename with UNKNOWN
+        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
+        fallback_filename = f"UNKNOWN_UNKNOWN_UNKNOWN#{user_symbol}{original_ext}"
+        new_path = os.path.join(VALIDATED_DIR, fallback_filename)
+        os.rename(validated_path, new_path)
+        return fallback_filename
+
+from fastapi import WebSocket, WebSocketDisconnect
+from watchfiles import awatch
+from pathlib import Path
+
+
+@router.websocket("/ws/sharepoint")
+async def websocket_sharepoint(ws: WebSocket):
+    """
+    WebSocket that streams updates when files in SHAREPOINT_DIR change.
+    Sends the full updated file list each time.
+    """
+    await ws.accept()
+    try:
+        # Send initial file list
+        await ws.send_json(_get_sharepoint_files_structured())
+
+        async for changes in awatch(SHAREPOINT_DIR):
+            # Any change (added, modified, deleted) triggers an update
+            await ws.send_json(_get_sharepoint_files_structured())
+    except WebSocketDisconnect:
+        print("🔌 Client disconnected from /ws/sharepoint")
+    except Exception as e:
+        print(f"❌ Error in /ws/sharepoint: {e}")
 from typing import Optional
 
 # Map user symbols back to names for frontend
@@ -33,7 +203,6 @@ def parse_filename_metadata(filename: str):
         print(f"Error parsing filename metadata: {filename}, {e}")
         return None
 
-
 def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
     """
     Return structured info for frontend table.
@@ -68,12 +237,150 @@ def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = No
     except Exception as e:
         return {"error": f"Could not list SharePoint files: {str(e)}"}
 
-
 from fastapi import Query
+@router.get("/api/sharepoint-files")
+def list_sharepoint_files():
+    return _get_sharepoint_files_structured(limit=None)  # will return all files
 
-@router.get("/api/sharepoint-files-structured")
-def sharepoint_files_structured(
-    limit: int = Query(100, description="Max files to return"),
-    search: Optional[str] = Query(None, description="Filter by standard or version")
-):
-    return _get_sharepoint_files_structured(limit=limit, search=search)
+@router.post("/api/validate")
+def validate_file(req: ValidateRequest):
+    file_location = os.path.join(UPLOAD_DIR, req.filename)
+    if not os.path.isfile(file_location):
+        return {"is_valid": False, "validation_message": "Not Found"}
+
+    # Run validation
+    is_valid, validation_message = validate_document(file_location)
+
+    if is_valid:
+        ext = os.path.splitext(req.filename)[1].lower()
+
+        # Extract content for renaming
+        if ext == ".docx":
+            content = read_docx(file_location)
+        elif ext == ".doc":
+            content = read_doc(file_location)
+        else:
+            content = ""
+
+        # --- Use the new rename_with_metadata function ---
+        new_filename = rename_with_metadata(file_location, content, ext)
+
+        return {
+            "is_valid": True,
+            "validation_message": validation_message,
+            "validated_location": os.path.join(VALIDATED_DIR, new_filename),
+            "renamed_filename": new_filename
+        }
+
+    else:
+        return {"is_valid": False, "validation_message": validation_message}
+    
+class IngestRequest(BaseModel):
+    filename: str
+
+@router.post("/api/ingest")
+def ingest_file(req: IngestRequest):
+    # --- Try direct match first ---
+    validated_location = os.path.join(VALIDATED_DIR, req.filename)
+    
+    if not os.path.isfile(validated_location):
+        # --- Fallback: search for renamed file ---
+        matches = [
+            f for f in os.listdir(VALIDATED_DIR)
+            if f.startswith(os.path.splitext(req.filename)[0])
+        ]
+        if matches:
+            validated_location = os.path.join(VALIDATED_DIR, matches[0])
+        else:
+            return {"success": False, "message": "File not found in validated docs."}
+
+    # Extract content
+    ext = os.path.splitext(validated_location)[1].lower()
+    if ext == ".docx":
+        content = read_docx(validated_location)
+    elif ext == ".doc":
+        content = read_doc(validated_location)
+    else:
+        content = ""
+
+    # Extract standard metadata
+    standard_match = STANDARD_REGEX.search(content)
+    standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
+
+    version_match = VERSION_REGEX.search(content)
+    version = version_match.group(0).upper() if version_match else "V0.0.0"
+
+    release_date_match = DATE_REGEX.search(content)
+    release_date = release_date_match.group(1) if release_date_match else None
+
+    metadata = {
+        "filename": os.path.basename(validated_location),
+        "standard_name": standard_name,
+        "standard_version": version,
+        "release_date": release_date
+    }
+
+    # Ingest as before
+    try:
+        if already_ingested(standard_name, version, persist_dir=PATH_TO_VECTORSTORE):
+            return {
+                "success": False,
+                "message": f"⚠️ Standard '{standard_name}' version '{version}' already exists in vector DB",
+                "metadata": metadata,
+                "skipped": True
+            }
+        else:
+            ingest_text(content, metadata=metadata)
+            return {
+                "success": True,
+                "message": "✅ Ingested successfully into vector DB",
+                "metadata": metadata,
+                "skipped": False
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ Error ingesting: {str(e)}",
+            "metadata": metadata,
+            "skipped": False
+        }
+
+
+# --- SharePoint Sync Endpoint ---
+class SyncRequest(BaseModel):
+    filenames: List[str]
+
+
+@router.post("/api/sharepoint-sync")
+def sharepoint_sync(req: SyncRequest):
+    moved_files = []
+    errors = []
+    for filename in req.filenames:
+        validated_location = os.path.join(VALIDATED_DIR, filename)
+        sharepoint_location = os.path.join(SHAREPOINT_DIR, filename)
+        if not os.path.isfile(validated_location):
+            errors.append(f"{filename} not found in validated docs.")
+            continue
+        try:
+            shutil.move(validated_location, sharepoint_location)
+            moved_files.append(filename)
+        except Exception as e:
+            errors.append(f"{filename}: {str(e)}")
+
+    if errors and not moved_files:
+        return {"message": "No files synced.", "errors": errors}
+    elif errors:
+        return {"message": "Some files synced.", "synced": moved_files, "errors": errors}
+    else:
+        return {"message": "Synced successfully to SharePoint!", "synced": moved_files}
+
+
+# --- List Endpoints ---
+@router.get("/api/list-validated")
+def list_validated():
+    return {"files": os.listdir(VALIDATED_DIR)}
+
+
+# @router.get("/api/list-sharepoint")
+# def list_sharepoint():
+#     return {"files": os.listdir(SHAREPOINT_DIR)}
