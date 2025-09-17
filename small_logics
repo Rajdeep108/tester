@@ -228,19 +228,26 @@ def open_file_in_os(file_path: str):
         return False
 
 # Add this endpoint to your router (place it with your other endpoints)
-@router.post("/api/open-file/{filename}")
+@router.get("/api/open-file/{filename}")
 async def open_file(filename: str):
     """Endpoint to 'open' a file using the default program (MS Word)"""
+    print(f"🔍 Looking for file: {filename}")  # Debug log
+    
     try:
         # Security: Basic check to prevent directory traversal
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
             
         file_path = os.path.join(SHAREPOINT_DIR, filename)
+        print(f"📁 Full path: {file_path}")  # Debug log
         
         if not os.path.isfile(file_path):
+            # Let's see what files ARE in the directory
+            files_in_dir = os.listdir(SHAREPOINT_DIR)
+            print(f"📂 Files in directory: {files_in_dir}")  # Debug log
             raise HTTPException(status_code=404, detail="File not found")
         
+        print(f"✅ File found, opening: {file_path}")  # Debug log
         # This opens the file on the SERVER's machine (your PC)
         success = open_file_in_os(file_path)
         
@@ -253,7 +260,7 @@ async def open_file(filename: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 from fastapi import Query
 # Also add this endpoint to get the actual file content for your viewer
 @router.get("/api/get-file-content")
@@ -299,8 +306,10 @@ def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = No
                 size_kb = round(f.stat().st_size / 1024, 2)
                 meta.update({
                     "size": f"{size_kb} KB",
-                    "open_url": f.resolve().as_uri(),
-                    "download_url": f.resolve().as_uri(),
+                    "open_url": f"/api/open-file/{f.name}",
+                    "download_url": f"/api/download/{f.name}",
+                    "filename": f.name,  # ← The actual filename on disk
+                    "renamed_filename": f.name  # ← Add this too for consistency
                 })
                 # Apply search filter if given
                 if search:
@@ -313,6 +322,29 @@ def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = No
     except Exception as e:
         return {"error": f"Could not list SharePoint files: {str(e)}"}
 
+from fastapi.responses import FileResponse
+@router.get("/api/download/{filename}")
+async def download_file(filename: str):
+    """Endpoint to download a file"""
+    try:
+        # Security: Basic check to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+            
+        file_path = os.path.join(SHAREPOINT_DIR, filename)
+        
+        if not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Return the file for download
+        return FileResponse(
+            file_path,
+            filename=filename,
+            media_type="application/octet-stream"
+        )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 from fastapi import Query
 @router.get("/api/sharepoint-files")
