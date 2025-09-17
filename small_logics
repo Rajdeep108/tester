@@ -1,31 +1,3 @@
-
-  "files": [
-    {
-      "standard": "3GPP TR 23.700-67",
-      "version": "V0.3.0",
-      "releaseDate": "2025-08",
-      "uploadedBy": "Rajdeep",
-      "size": "2975.7 KB",
-      "open_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V0.3.0_2025-08%23%40.docx",
-      "download_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V0.3.0_2025-08%23%40.docx"
-    },
-    {
-      "standard": "3GPP TR 23.700-67",
-      "version": "V1.0.0",
-      "releaseDate": "2025-09",
-      "uploadedBy": "Rajdeep",
-      "size": "2977.98 KB",
-      "open_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V1.0.0_2025-09%23%40.docx",
-      "download_url": "file:///C:/Users/342534/NTT%20DATA%20North%20America/GenAI%20CoE%20India%20-%20Standards/3GPP%20TR%2023.700-67_V1.0.0_2025-09%23%40.docx"
-    }
-  ]
-}
-
-
-
-
---------------------------------------------------------------------------
-
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -269,9 +241,9 @@ export default function StandardsManagementPage() {
 
   const filteredVersions = files.filter((file) => {
   return (
-    file.standard_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    file.standard_version.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    file.uploaded_by.toLowerCase().includes(searchTerm.toLowerCase())
+    file.standard.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    file.version.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    file.uploadedBy.toLowerCase().includes(searchTerm.toLowerCase())
   );
 });
 
@@ -389,30 +361,30 @@ export default function StandardsManagementPage() {
                   </thead>
                   <tbody>
                     {filteredVersions.map((file, index) => (
-  <tr key={index} className="border-b dark:border-gray-800 hover:bg-gradient-to-r hover:from-blue-50 hover:to-teal-50 dark:hover:from-blue-900 dark:hover:to-teal-900 transition">
-    <td className="py-3 px-4 font-medium text-blue-900 dark:text-blue-100">{file.standard_name}</td>
-    <td className="py-3 px-4 text-blue-700 dark:text-blue-200">{file.standard_version}</td>
-    <td className="py-3 px-4 text-blue-400 dark:text-blue-300 italic">{file.uploaded_by}</td>
-    <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.release_date}</td>
-    <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.size_kb}</td>
-    <td className="py-3 px-4 flex gap-1">
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => {
-          setModalOpen(true);
-          setModalDetail(file);
-        }}
-      >
-        <Eye className="h-4 w-4 text-blue-500" />
-      </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={() => window.open(file.download_url, '_blank')}
-      >
-        <Download className="h-4 w-4 text-blue-500" />
-      </Button>
+                    <tr key={index} className="border-b dark:border-gray-800 hover:bg-gradient-to-r hover:from-blue-50 hover:to-teal-50 dark:hover:from-blue-900 dark:hover:to-teal-900 transition">
+                      <td className="py-3 px-4 font-medium text-blue-900 dark:text-blue-100">{file.standard``}</td>
+                      <td className="py-3 px-4 text-blue-700 dark:text-blue-200">{file.version}</td>
+                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300 italic">{file.uploadedBy}</td>
+                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.releaseDate}</td>
+                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.size}</td>
+                      <td className="py-3 px-4 flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            setModalOpen(true);
+                            setModalDetail(file);
+                          }}
+                        >
+                          <Eye className="h-4 w-4 text-blue-500" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => window.open(file.download_url, '_blank')}
+                        >
+                          <Download className="h-4 w-4 text-blue-500" />
+                        </Button>
 
                           </td>
                         </tr>
