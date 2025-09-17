@@ -70,24 +70,6 @@ export function WordViewerModal({
   );
 }
 
-const handleOpenFile = async (filename) => {
-  try {
-    // This calls your FastAPI endpoint, which opens the file locally
-    const response = await fetch(`http://localhost:8000/api/open-file/${encodeURIComponent(filename)}`, {
-      method: 'POST'
-    });
-    
-    if (response.ok) {
-      console.log(`Requested to open ${filename}`);
-      // The file is now opening on the server's machine (your PC)
-    } else {
-      console.error('Failed to open file');
-    }
-  } catch (error) {
-    console.error('Error:', error);
-  }
-};
-
 // Animated blue/teal glassy background
 function BackgroundSVG() {
   return (
@@ -316,6 +298,43 @@ export default function StandardsManagementPage() {
 
   const [files, setFiles] = useState<any[]>([]);
 
+  const handleOpenFile = async (filename) => {
+  try {
+    // This calls your FastAPI endpoint, which opens the file locally
+    const response = await fetch(`http://localhost:8000/api/open-file/${encodeURIComponent(filename)}`, {
+      method: 'GET'
+    });
+    
+    if (response.ok) {
+      console.log(`Requested to open ${filename}`);
+      // The file is now opening on the server's machine (your PC)
+    } else {
+      console.error('Failed to open file');
+    }
+  } catch (error) {
+    console.error('Error:', error);
+  }
+};
+
+const handleDownload = async (filename) => {
+  try {
+    const response = await fetch(`http://localhost:8000/api/download/${encodeURIComponent(filename)}`);
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  } catch (error) {
+    console.error('Download failed:', error);
+  }
+};
+
+
   useEffect(() => {
   fetch('http://localhost:8000/api/sharepoint-files')
     .then((res) => res.json())
@@ -456,14 +475,14 @@ export default function StandardsManagementPage() {
                             variant="ghost"
                             size="icon"
                             onClick={() => {
-                              handleOpenFile(file.renamed_filename || file.filename)}}
+                              handleOpenFile(file.renamed_filename || file.filename || file.name)}}
                           >
                             <Eye className="h-4 w-4 text-blue-500" />
                           </Button>
                         <Button
                           variant="ghost"
                           size="icon"
-                          onClick={() => window.open(file.download_url, '_blank')}
+                          onClick={() => handleDownload(file.renamed_filename || file.filename)}
                         >
                           <Download className="h-4 w-4 text-blue-500" />
                         </Button>
