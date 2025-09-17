@@ -1,32 +1,46 @@
-@router.get("/api/open-file/{filename}")
-async def open_file(filename: str):
-    """Endpoint to 'open' a file using the default program (MS Word)"""
-    print(f"🔍 Looking for file: {filename}")  # Debug log
-    
+def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
+    """
+    Return structured info for frontend table.
+    Supports optional search/filter by standard or version.
+    """
     try:
-        # Security: Basic check to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-            
-        file_path = os.path.join(SHAREPOINT_DIR, filename)
-        print(f"📁 Full path: {file_path}")  # Debug log
-        
-        if not os.path.isfile(file_path):
-            # Let's see what files ARE in the directory
-            files_in_dir = os.listdir(SHAREPOINT_DIR)
-            print(f"📂 Files in directory: {files_in_dir}")  # Debug log
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        print(f"✅ File found, opening: {file_path}")  # Debug log
-        # This opens the file on the SERVER's machine (your PC)
-        success = open_file_in_os(file_path)
-        
-        if success:
-            return {"message": f"Opening {filename}"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to open file")
-            
-    except HTTPException:
-        raise
+        files = []
+        entries = sorted(
+            Path(SHAREPOINT_DIR).glob("*"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+        for f in entries[:limit]:
+            if f.is_file():
+                meta = parse_filename_metadata(f.name)
+                if not meta:
+                    continue
+                size_kb = round(f.stat().st_size / 1024, 2)
+                meta.update({
+                    "size": f"{size_kb} KB",
+                    "open_url": f"/api/open-file/{f.name}",
+                    "download_url": f"/api/download/{f.name}",
+                    "filename": f.name,  # ← The actual filename on disk
+                    "renamed_filename": f.name  # ← Add this too for consistency
+                })
+                # Apply search filter if given
+                if search:
+                    search_lower = search.lower()
+                    if search_lower not in meta["standard"].lower() and search_lower not in meta["version"].lower():
+                        continue
+                files.append(meta)
+
+        return {"files": files[:limit]}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"error": f"Could not list SharePoint files: {str(e)}"}
+
+
+
+
+<Button
+  variant="ghost"
+  size="icon"
+  onClick={() => handleOpenFile(file.renamed_filename || file.filename || file.name)}
+>
+  <Eye className="h-4 w-4 text-blue-500" />
+</Button>
