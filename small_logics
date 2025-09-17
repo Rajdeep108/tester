@@ -204,9 +204,58 @@ def parse_filename_metadata(filename: str):
         return None
 
 
-from fastapi import Query
+
+import platform
+import subprocess
 from fastapi.responses import JSONResponse
 
+# Add this function somewhere in your utilities section
+def open_file_in_os(file_path: str):
+    """Helper function to open a file using the default OS program"""
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(file_path)  # The cleanest way on Windows
+        elif system == "Darwin":  # macOS
+            subprocess.run(["open", file_path])
+        elif system == "Linux":
+            subprocess.run(["xdg-open", file_path])
+        else:
+            raise Exception(f"Unsupported operating system: {system}")
+        return True
+    except Exception as e:
+        print(f"Error opening file: {e}")
+        return False
+
+# Add this endpoint to your router (place it with your other endpoints)
+@router.post("/api/open-file/{filename}")
+async def open_file(filename: str):
+    """Endpoint to 'open' a file using the default program (MS Word)"""
+    try:
+        # Security: Basic check to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+            
+        file_path = os.path.join(SHAREPOINT_DIR, filename)
+        
+        if not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # This opens the file on the SERVER's machine (your PC)
+        success = open_file_in_os(file_path)
+        
+        if success:
+            return {"message": f"Opening {filename}"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to open file")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+from fastapi import Query
+# Also add this endpoint to get the actual file content for your viewer
 @router.get("/api/get-file-content")
 def get_file_content(filename: str = Query(...)):
     """
@@ -228,6 +277,7 @@ def get_file_content(filename: str = Query(...)):
         return {"content": content}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"Could not read file: {str(e)}"})
+
 
 def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
     """
