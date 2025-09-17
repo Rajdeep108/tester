@@ -1,46 +1,51 @@
-def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
-    """
-    Return structured info for frontend table.
-    Supports optional search/filter by standard or version.
-    """
+@router.get("/api/download/{filename}")
+async def download_file(filename: str):
+    """Endpoint to download a file"""
     try:
-        files = []
-        entries = sorted(
-            Path(SHAREPOINT_DIR).glob("*"),
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
+        # Security: Basic check to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+            
+        file_path = os.path.join(SHAREPOINT_DIR, filename)
+        
+        if not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Return the file for download
+        return FileResponse(
+            file_path,
+            filename=filename,
+            media_type="application/octet-stream"
         )
-        for f in entries[:limit]:
-            if f.is_file():
-                meta = parse_filename_metadata(f.name)
-                if not meta:
-                    continue
-                size_kb = round(f.stat().st_size / 1024, 2)
-                meta.update({
-                    "size": f"{size_kb} KB",
-                    "open_url": f"/api/open-file/{f.name}",
-                    "download_url": f"/api/download/{f.name}",
-                    "filename": f.name,  # ← The actual filename on disk
-                    "renamed_filename": f.name  # ← Add this too for consistency
-                })
-                # Apply search filter if given
-                if search:
-                    search_lower = search.lower()
-                    if search_lower not in meta["standard"].lower() and search_lower not in meta["version"].lower():
-                        continue
-                files.append(meta)
-
-        return {"files": files[:limit]}
+            
     except Exception as e:
-        return {"error": f"Could not list SharePoint files: {str(e)}"}
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
+const handleDownload = async (filename) => {
+  try {
+    const response = await fetch(`http://localhost:8000/api/download/${encodeURIComponent(filename)}`);
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  } catch (error) {
+    console.error('Download failed:', error);
+  }
+};
 
+// Then in your button:
 <Button
   variant="ghost"
   size="icon"
-  onClick={() => handleOpenFile(file.renamed_filename || file.filename || file.name)}
+  onClick={() => handleDownload(file.renamed_filename || file.filename)}
 >
-  <Eye className="h-4 w-4 text-blue-500" />
+  <Download className="h-4 w-4 text-blue-500" />
 </Button>
