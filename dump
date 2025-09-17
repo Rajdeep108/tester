@@ -1,30 +1,110 @@
-@router.get("/api/sharepoint-file-content")
+# Add these imports at the top of your file
+import platform
+import subprocess
+from fastapi.responses import JSONResponse
+
+# Add this function somewhere in your utilities section
+def open_file_in_os(file_path: str):
+    """Helper function to open a file using the default OS program"""
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(file_path)  # The cleanest way on Windows
+        elif system == "Darwin":  # macOS
+            subprocess.run(["open", file_path])
+        elif system == "Linux":
+            subprocess.run(["xdg-open", file_path])
+        else:
+            raise Exception(f"Unsupported operating system: {system}")
+        return True
+    except Exception as e:
+        print(f"Error opening file: {e}")
+        return False
+
+# Add this endpoint to your router (place it with your other endpoints)
+@router.post("/api/open-file/{filename}")
+async def open_file(filename: str):
+    """Endpoint to 'open' a file using the default program (MS Word)"""
+    try:
+        # Security: Basic check to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+            
+        file_path = os.path.join(SHAREPOINT_DIR, filename)
+        
+        if not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # This opens the file on the SERVER's machine (your PC)
+        success = open_file_in_os(file_path)
+        
+        if success:
+            return {"message": f"Opening {filename}"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to open file")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Also add this endpoint to get the actual file content for your viewer
+@router.get("/api/get-file-content")
 def get_file_content(filename: str = Query(...)):
+    """
+    Returns the full text content of a validated SharePoint file.
+    """
     file_path = os.path.join(SHAREPOINT_DIR, filename)
     if not os.path.isfile(file_path):
-        return {"error": "File not found"}
+        return JSONResponse(status_code=404, content={"error": "File not found."})
 
     ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".docx":
-        content = read_docx(file_path)
-    elif ext == ".doc":
-        content = read_doc(file_path)
-    else:
-        return {"error": "Unsupported file type"}
+    try:
+        if ext == ".docx":
+            content = read_docx(file_path)
+        elif ext == ".doc":
+            content = read_doc(file_path)
+        else:
+            return JSONResponse(status_code=400, content={"error": "Unsupported file type."})
+        
+        return {"content": content}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Could not read file: {str(e)}"})
 
-    return {
-        "filename": filename,
-        "content": content
+
+
+
+const handleOpenFile = async (filename) => {
+  try {
+    // This calls your FastAPI endpoint, which opens the file locally
+    const response = await fetch(`http://localhost:8000/api/open-file/${encodeURIComponent(filename)}`, {
+      method: 'POST'
+    });
+    
+    if (response.ok) {
+      console.log(`Requested to open ${filename}`);
+      // The file is now opening on the server's machine (your PC)
+    } else {
+      console.error('Failed to open file');
     }
+  } catch (error) {
+    console.error('Error:', error);
+  }
+};
 
 
 
-useEffect(() => {
-  if (!viewerFilename) return;
 
-  setViewerContent("Loading content...");
-  fetch(`http://localhost:8000/api/sharepoint-file-content?filename=${encodeURIComponent(viewerFilename)}`)
-    .then(res => res.json())
-    .then(data => setViewerContent(data.content || "No content available."))
-    .catch(err => setViewerContent("Failed to load content."));
-}, [viewerFilename]);
+
+
+
+
+
+<Button
+  variant="ghost"
+  size="icon"
+  onClick={() => handleOpenFile(file.renamed_filename || file.filename)}
+>
+  <Eye className="h-4 w-4 text-blue-500" />
+</Button>
+
