@@ -70,6 +70,23 @@ export function WordViewerModal({
   );
 }
 
+const handleOpenFile = async (filename) => {
+  try {
+    // This calls your FastAPI endpoint, which opens the file locally
+    const response = await fetch(`http://localhost:8000/api/open-file/${encodeURIComponent(filename)}`, {
+      method: 'POST'
+    });
+    
+    if (response.ok) {
+      console.log(`Requested to open ${filename}`);
+      // The file is now opening on the server's machine (your PC)
+    } else {
+      console.error('Failed to open file');
+    }
+  } catch (error) {
+    console.error('Error:', error);
+  }
+};
 
 // Animated blue/teal glassy background
 function BackgroundSVG() {
@@ -296,20 +313,15 @@ export default function StandardsManagementPage() {
   const [viewerOpen, setViewerOpen] = useState(false);
   const [viewerFilename, setViewerFilename] = useState("");
   const [viewerDownloadUrl, setViewerDownloadUrl] = useState("");
-  const [viewerContent, setViewerContent] = useState<string>("");
-
 
   const [files, setFiles] = useState<any[]>([]);
 
   useEffect(() => {
-  if (!viewerFilename) return;
-
-  setViewerContent("Loading content...");
-  fetch(`http://localhost:8000/api/sharepoint-file-content?filename=${encodeURIComponent(viewerFilename)}`)
-    .then(res => res.json())
-    .then(data => setViewerContent(data.content || "No content available."))
-    .catch(err => setViewerContent("Failed to load content."));
-}, [viewerFilename]);
+  fetch('http://localhost:8000/api/sharepoint-files')
+    .then((res) => res.json())
+    .then((data) => setFiles(data.files || []))
+    .catch((err) => console.error('Failed to fetch files:', err));
+  }, []);
 
   const filteredVersions = files.filter((file) => {
   return (
@@ -444,10 +456,7 @@ export default function StandardsManagementPage() {
                             variant="ghost"
                             size="icon"
                             onClick={() => {
-                              setViewerFilename(file.renamed_filename || file.filename);
-                              setViewerDownloadUrl(file.download_url);
-                              setViewerOpen(true);
-                            }}
+                              handleOpenFile(file.renamed_filename || file.filename)}}
                           >
                             <Eye className="h-4 w-4 text-blue-500" />
                           </Button>
