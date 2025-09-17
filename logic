@@ -1,7 +1,79 @@
-✅ Add this function (right after _get_sharepoint_files):
+from typing import Optional
+
+# Map user symbols back to names for frontend
+USER_SYMBOL_TO_NAME = {v: k for k, v in USER_SYMBOLS.items()}
+
+def parse_filename_metadata(filename: str):
+    """
+    Extract standard, version, release date, uploadedBy from filename:
+    Format: <STANDARD>_<VERSION>_<RELEASEDATE>#<USER>.ext
+    """
+    name, _ext = os.path.splitext(filename)
+    try:
+        parts = name.split("_")
+        if len(parts) < 3:
+            return None  # Cannot parse
+
+        standard = parts[0] + ("" if len(parts) == 3 else "_" + "_".join(parts[1:-2]))
+        version = parts[-2]
+        release_user = parts[-1]
+        if "#" in release_user:
+            release_date, user_symbol = release_user.split("#")
+            uploaded_by = USER_SYMBOL_TO_NAME.get(user_symbol, "UNKNOWN")
+        else:
+            release_date = release_user
+            uploaded_by = "UNKNOWN"
+        return {
+            "standard": standard,
+            "version": version,
+            "releaseDate": release_date,
+            "uploadedBy": uploaded_by
+        }
+    except Exception as e:
+        print(f"Error parsing filename metadata: {filename}, {e}")
+        return None
+
+
+def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
+    """
+    Return structured info for frontend table.
+    Supports optional search/filter by standard or version.
+    """
+    try:
+        files = []
+        entries = sorted(
+            Path(SHAREPOINT_DIR).glob("*"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+        for f in entries[:limit]:
+            if f.is_file():
+                meta = parse_filename_metadata(f.name)
+                if not meta:
+                    continue
+                size_kb = round(f.stat().st_size / 1024, 2)
+                meta.update({
+                    "size": f"{size_kb} KB",
+                    "open_url": f.resolve().as_uri(),
+                    "download_url": f.resolve().as_uri(),
+                })
+                # Apply search filter if given
+                if search:
+                    search_lower = search.lower()
+                    if search_lower not in meta["standard"].lower() and search_lower not in meta["version"].lower():
+                        continue
+                files.append(meta)
+
+        return {"files": files[:limit]}
+    except Exception as e:
+        return {"error": f"Could not list SharePoint files: {str(e)}"}
+
+
 from fastapi import Query
 
-@router.get("/api/sharepoint-files")
-def list_sharepoint_files():
-    return _get_sharepoint_files(limit=None)  # will return all files
-
+@router.get("/api/sharepoint-files-structured")
+def sharepoint_files_structured(
+    limit: int = Query(100, description="Max files to return"),
+    search: Optional[str] = Query(None, description="Filter by standard or version")
+):
+    return _get_sharepoint_files_structured(limit=limit, search=search)
