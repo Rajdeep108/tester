@@ -1,33 +1,24 @@
-import React, { useRef, useState } from "react";
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 import {
-  FileText,
-  X,
-  Upload,
-  AlertTriangle,
-  CheckCircle,
-  Loader2,
-  Search,
-  ArrowRight,
-  Share2,
-  FolderOpen,
-  ExternalLink,
-  Folder,
-  FilePlus2,
-} from "lucide-react";
-import axios from "axios";
+  FileText, Settings, Eye, X, Brain, Upload, Sun, Moon, Download
+} from 'lucide-react';
 
-// --- THEMED ANIMATED BACKGROUND SVG ---
+// Animated blue/teal glassy background
 function BackgroundSVG() {
   return (
-    <svg className="absolute inset-0 pointer-events-none z-0 w-full h-full" width="100%" height="100%">
+    <svg className="fixed inset-0 pointer-events-none z-0 w-full h-full" width="100%" height="100%">
       <defs>
         <radialGradient id="bg-gradient-1" cx="50%" cy="50%" r="80%">
-          <stop offset="0%" stopColor="#c7d2fe" stopOpacity="0.3" />
-          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0" />
+          <stop offset="0%" stopColor="#c7d2fe" stopOpacity="0.23" />
+          <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
         </radialGradient>
         <radialGradient id="bg-gradient-2" cx="50%" cy="50%" r="80%">
-          <stop offset="0%" stopColor="#a7f3d0" stopOpacity="0.26" />
-          <stop offset="100%" stopColor="#0ea5e9" stopOpacity="0" />
+          <stop offset="0%" stopColor="#bae6fd" stopOpacity="0.18" />
+          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
         </radialGradient>
       </defs>
       <circle cx="85%" cy="12%" r="110" fill="url(#bg-gradient-1)" />
@@ -36,719 +27,390 @@ function BackgroundSVG() {
   );
 }
 
-type UploadStatus = "idle" | "uploading" | "uploaded" | "type-error" | "upload-error";
-type ValidationStatus = "idle" | "validating" | "success" | "error";
-type SharePointStatus = "idle" | "syncing" | "success" | "error";
-
-interface FileRecord {
-  file: File;
-  uploadStatus: UploadStatus;
-  uploadMessage: string;
-  validationStatus: ValidationStatus;
-  validationMessage: string;
-  size: number;
-  validationStep: number;
-  ingestionStatus?: "idle" | "processing" | "success" | "skipped" | "error";
-  ingestionMessage?: string;
-}
-
-const VALIDATION_STEPS = [
-  { key: 1, label: "Checking keywords" },
-  { key: 2, label: "Checking document structure" },
+const statsCards = [
+  {
+    title: 'Total Standards',
+    value: '247',
+    subtitle: 'in this month',
+    icon: FileText,
+    iconColor: 'text-blue-500 bg-blue-100 dark:bg-blue-900',
+  },
+  {
+    title: 'Active Workflows',
+    value: '8',
+    subtitle: 'running',
+    icon: Settings,
+    iconColor: 'text-blue-500 bg-blue-100 dark:bg-blue-900',
+  },
 ];
-const ACCEPTED_TYPES = [
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-];
-const SHAREPOINT_FOLDER_PATH =
-  "https://nttdatagroup.sharepoint.com/:f:/r/sites/NA-CD-DT-GenAI-CoE-India/Shared%20Documents/Capstone-3_Projects/Team_07/Standards?csf=1&web=1&e=i6xXOe";
 
-const ValidationProgress = ({ step }: { step: number }) => {
-  const percent =
-    step <= 1
-      ? 0
-      : Math.min(((step - 1) / (VALIDATION_STEPS.length + 1)) * 100, 100);
-  return (
-    <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-xl h-2 mt-2 mb-2 overflow-hidden">
-      <div
-        className="h-2 bg-gradient-to-r from-blue-400 to-teal-400 transition-all duration-700"
-        style={{ width: `${percent}%` }}
-      ></div>
-    </div>
-  );
+const versionsData = [
+  {
+    version: 'v17.9.0',
+    standard: '3GPP TS 23.501',
+    releaseDate: '2024-06-15',
+    impact: 'major',
+    size: '2.4MB',
+    uploadedBy: 'Harshita Nagaraj Guled',
+  },
+  {
+    version: 'v17.8.0',
+    standard: '3GPP TS 23.501',
+    releaseDate: '2024-03-20',
+    impact: 'minor',
+    size: '2.3MB',
+    uploadedBy: 'Neelambuz Singh',
+  },
+  {
+    version: 'v17.10.0-draft',
+    standard: '3GPP TS 23.501',
+    releaseDate: '2024-07-01',
+    impact: 'major',
+    size: '2.5MB',
+    uploadedBy: 'Rajdeep Roshan Sahu',
+  },
+];
+
+const versionDetails = [
+  {
+    id: '3GPP TS 23.501 v17.9.0',
+    standard: '3GPP TS 23.501',
+    version: 'v17.9.0',
+    releaseDate: '2024-06-15',
+    author: '3GPP SA2',
+    size: '2.4 MB',
+    keyChanges: [
+      'Enhanced 5G Core network procedures',
+      'New service continuity mechanisms',
+      'Updated security protocols'],
+    controlPlanePolicies: [
+      "Strict authentication for control messages",
+      "Dynamic resource allocation policy",
+      "Unified session management policy"
+    ],
+  },
+  {
+    id: '3GPP TS 23.501 v17.8.0',
+    standard: '3GPP TS 23.501',
+    version: 'v17.8.0',
+    releaseDate: '2024-03-20',
+    author: '3GPP SA2',
+    size: '2.3 MB',
+    keyChanges: [
+      'Network slicing improvements',
+      'Edge computing enhancements',
+      'Bug fixes for roaming scenarios',
+    ],
+    controlPlanePolicies: [
+      "Legacy control signaling support",
+      "Basic resource allocation policy",
+      "Manual session management policy"],
+  },
+  {
+    id: '3GPP TS 23.501 v17.10.0-draft',
+    standard: '3GPP TS 23.501',
+    version: 'v17.10.0-draft',
+    releaseDate: '2024-07-01',
+    author: '3GPP SA2',
+    size: '2.5 MB',
+    keyChanges: [
+      'Draft: Early 5G Core feature integration',
+      'Planned security updates',
+      'Service orchestration improvements',
+    ],
+    controlPlanePolicies: [
+      "Draft: Dynamic session policy",
+      "Planned unified resource allocation",
+      "Upcoming authentication mechanism"
+    ],
+  },
+];
+
+// BADGES
+const getImpactBadge = (impact: string) => {
+  switch (impact) {
+    case 'major':
+      return (
+        <Badge className="bg-gradient-to-r from-blue-500 to-teal-400 text-white font-semibold px-2 border border-blue-400 rounded-full">
+          major
+        </Badge>
+      );
+    case 'minor':
+      return (
+        <Badge className="bg-gradient-to-r from-blue-100 to-teal-100 text-blue-700 font-semibold px-2 border border-blue-200 rounded-full">
+          minor
+        </Badge>
+      );
+    default:
+      return <Badge className="rounded-full">{impact}</Badge>;
+  }
 };
 
-function Modal({
+// Modal for standard details
+function StandardModal({
   open,
   onClose,
-  children,
+  detail,
 }: {
   open: boolean;
   onClose: () => void;
-  children: React.ReactNode;
+  detail: any;
 }) {
-  if (!open) return null;
+  if (!open || !detail) return null;
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div
-        className="
-          relative
-          w-full
-          max-w-4xl
-          max-h-[95vh]
-          rounded-3xl
-          p-0
-          shadow-2xl
-          border
-          border-blue-100
-          bg-white/90 dark:bg-gray-900/95
-          animate-fade-in
-          flex
-          flex-col
-        "
-        style={{ overflow: "hidden" }}
-      >
+    <div className="fixed z-50 inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="bg-white/90 dark:bg-gray-900/90 rounded-2xl max-w-lg w-full p-7 shadow-2xl border border-blue-100 dark:border-gray-800 relative animate-fade-in">
         <button
-          className="absolute top-6 right-6 z-50 rounded-full hover:bg-blue-100 dark:hover:bg-gray-800 p-2"
+          className="absolute top-3 right-3 rounded-full hover:bg-blue-100 dark:hover:bg-gray-800 p-1"
           onClick={onClose}
         >
-          <X className="w-7 h-7 text-blue-400 dark:text-blue-300" />
+          <X className="w-6 h-6 text-blue-400" />
         </button>
-        <div className="overflow-y-auto max-h-[85vh] p-0">{children}</div>
+        <div className="flex items-center gap-3 mb-3">
+          <FileText className="h-7 w-7 text-blue-400" />
+          <span className="font-extrabold text-2xl text-blue-800 dark:text-blue-100">{detail.standard}</span>
+          <span className="ml-auto px-3 py-1 rounded-full bg-gradient-to-r from-blue-100 to-teal-100 dark:from-blue-900 dark:to-teal-900 text-blue-700 dark:text-blue-200 text-xs font-bold">{detail.version}</span>
+        </div>
+        <div className="text-blue-500 dark:text-blue-300 mb-3 text-sm">
+          Released on {detail.releaseDate} by {detail.author}
+        </div>
+        <div>
+          <h4 className="font-medium text-blue-700 dark:text-blue-200 mb-2">Key Changes:</h4>
+          <ul className="space-y-1 mb-3">
+            {detail.keyChanges.map((change: string, idx: number) => (
+              <li key={idx} className="text-sm text-blue-800 dark:text-blue-100 flex items-start gap-2">
+                <span className="w-1 h-1 bg-blue-500 rounded-full mt-2 flex-shrink-0"></span>
+                {change}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h4 className="font-medium text-blue-700 dark:text-blue-200 mb-2">New Control-plane Requirements:</h4>
+          <ul className="space-y-1">
+            {detail.controlPlanePolicies.map((policy: string, idx: number) => (
+              <li key={idx} className="text-sm text-blue-800 dark:text-blue-100 flex items-start gap-2">
+                <span className="w-1 h-1 bg-blue-500 rounded-full mt-2 flex-shrink-0"></span>
+                {policy}
+              </li>
+            ))}
+          </ul>
+        </div>
       </div>
     </div>
   );
 }
 
-export default function DocumentUpload() {
-  const [files, setFiles] = useState<FileRecord[]>([]);
-  const [sharePointStatus, setSharePointStatus] = useState<SharePointStatus>(
-    "idle"
-  );
-  const [sharePointMessage, setSharePointMessage] = useState<string>("");
+// --- DARK MODE HOOK ---
+function usePageDarkMode() {
+  const [dark, setDark] = useState(false);
+
+  // On mount: use prefers-color-scheme, then localStorage
+  useEffect(() => {
+    // First check localStorage
+    const stored = localStorage.getItem('standards-darkmode');
+    if (stored === 'true') setDark(true);
+    else if (stored === 'false') setDark(false);
+    else if (window.matchMedia('(prefers-color-scheme: dark)').matches) setDark(true);
+  }, []);
+
+  useEffect(() => {
+    // Toggle dark class on document.documentElement for this page
+    if (dark) document.documentElement.classList.add('dark');
+    else document.documentElement.classList.remove('dark');
+    localStorage.setItem('standards-darkmode', dark ? 'true' : 'false');
+  }, [dark]);
+
+  return [dark, setDark] as const;
+}
+
+export default function StandardsManagementPage() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [modalDetail, setModalDetail] = useState<any>(null);
   const [modalOpen, setModalOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dark, setDark] = usePageDarkMode();
 
-  // --- File Validation ---
-  const validateFile = (file: File): string | null => {
-    if (
-      !(
-        ACCEPTED_TYPES.includes(file.type) ||
-        file.name.toLowerCase().endsWith(".doc") ||
-        file.name.toLowerCase().endsWith(".docx")
-      )
-    ) {
-      return "Only Standards files are allowed.";
-    }
-    if (file.size > 50 * 1024 * 1024) return "File must be less than 50MB.";
-    return null;
-  };
-
-  const handleFiles = (filesList: FileList | null) => {
-    if (!filesList) return;
-    const arr = Array.from(filesList);
-    arr.forEach((file) => {
-      const error = validateFile(file);
-      if (error) {
-        setFiles((prev) => [
-          ...prev,
-          {
-            file,
-            uploadStatus: "type-error",
-            uploadMessage: error,
-            validationStatus: "idle",
-            validationMessage: "",
-            size: file.size,
-            validationStep: 0,
-          },
-        ]);
-        return;
-      }
-      setFiles((prev) => [
-        ...prev,
-        {
-          file,
-          uploadStatus: "uploading",
-          uploadMessage: "Uploading...",
-          validationStatus: "idle",
-          validationMessage: "",
-          size: file.size,
-          validationStep: 0,
-          ingestionStatus: "idle",
-          ingestionMessage: "",
-        },
-      ]);
-      uploadFile(file);
-    });
-  };
-
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    handleFiles(e.dataTransfer.files);
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    handleFiles(e.target.files);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const uploadFile = async (file: File) => {
-    const data = new FormData();
-    data.append("file", file);
-    try {
-      await new Promise((res) => setTimeout(res, 700));
-      await axios.post("http://localhost:8000/api/upload", data, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.file === file
-            ? {
-                ...f,
-                uploadStatus: "uploaded",
-                uploadMessage: "Uploaded successfully!",
-                validationStep: 1,
-              }
-            : f
-        )
-      );
-    } catch (err: any) {
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.file === file
-            ? {
-                ...f,
-                uploadStatus: "upload-error",
-                uploadMessage:
-                  err.response?.data?.detail ||
-                  err.message ||
-                  "Upload failed",
-              }
-            : f
-        )
-      );
-    }
-  };
-
-  const validateUploadedFile = async (file: File) => {
-  // Show stepwise validation progress
-  for (let i = 0; i < VALIDATION_STEPS.length; i++) {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.file === file
-          ? {
-              ...f,
-              validationStatus: "validating",
-              validationMessage: VALIDATION_STEPS[i].label + "...",
-              validationStep: i + 2,
-            }
-          : f
-      )
+  const filteredVersions = versionsData.filter((version) => {
+    return (
+      version.standard.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      version.version.toLowerCase().includes(searchTerm.toLowerCase())
     );
-    await new Promise((res) => setTimeout(res, 800));
-  }
+  });
 
-  try {
-    // Validate API
-    const res = await axios.post(
-      "http://localhost:8000/api/validate",
-      { filename: file.name },
-      { headers: { "Content-Type": "application/json" } }
-    );
-
-    if (res.data.is_valid) {
-      // Show validation complete
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.file === file
-            ? {
-                ...f,
-                validationStatus: "success",
-                validationMessage: res.data.validation_message,
-                validationStep: VALIDATION_STEPS.length + 2,
-                ingestionStatus: "processing", // Start ingestion immediately
-                ingestionMessage: "Ingesting into VectorDB...",
-              }
-            : f
-        )
-      );
-
-      // Ingestion API (auto, after validation)
-      try {
-        const ingestRes = await axios.post(
-          "http://localhost:8000/api/ingest",
-          { filename: file.name },
-          { headers: { "Content-Type": "application/json" } }
-        );
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.file === file
-              ? {
-                  ...f,
-                  ingestionStatus: ingestRes.data.success
-                    ? "success"
-                    : ingestRes.data.skipped
-                    ? "skipped"
-                    : "error",
-                  ingestionMessage: ingestRes.data.message,
-                }
-              : f
-          )
-        );
-      } catch (ingestErr: any) {
-        setFiles((prev) =>
-          prev.map((f) =>
-            f.file === file
-              ? {
-                  ...f,
-                  ingestionStatus: "error",
-                  ingestionMessage:
-                    ingestErr.response?.data?.detail ||
-                    ingestErr.message ||
-                    "Ingestion failed",
-                }
-              : f
-          )
-        );
-      }
-    } else {
-      // Validation failed
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.file === file
-            ? {
-                ...f,
-                validationStatus: "error",
-                validationMessage: res.data.validation_message,
-                validationStep: VALIDATION_STEPS.length + 2,
-              }
-            : f
-        )
-      );
-    }
-  } catch (err: any) {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.file === file
-          ? {
-              ...f,
-              validationStatus: "error",
-              validationMessage:
-                err.response?.data?.detail ||
-                err.message ||
-                "Validation failed",
-              validationStep: VALIDATION_STEPS.length + 2,
-            }
-          : f
-      )
-    );
-  }
-};
-
-
-
-  const removeFile = (file: File) => {
-    setFiles((prev) => prev.filter((f) => f.file !== file));
-  };
-
-  const handleSharePointSync = async () => {
-    setSharePointStatus("syncing");
-    setSharePointMessage("Syncing validated documents to SharePoint...");
-    try {
-      const validatedFiles = files
-        .filter((f) => f.validationStatus === "success")
-        .map((f) => f.file.name);
-      if (validatedFiles.length === 0) {
-        setSharePointStatus("error");
-        setSharePointMessage("No validated files to sync.");
-        return;
-      }
-      const res = await axios.post(
-        "http://localhost:8000/api/sharepoint-sync",
-        { filenames: validatedFiles },
-        { headers: { "Content-Type": "application/json" } }
-      );
-      setSharePointStatus("success");
-      setSharePointMessage(
-        res.data?.message || "Synced successfully to SharePoint!"
-      );
-    } catch (err: any) {
-      setSharePointStatus("error");
-      setSharePointMessage(
-        err.response?.data?.detail || err.message || "SharePoint sync failed"
-      );
-    }
-  };
-
-  // --- Card border color for theme ---
-  const getCardBorder = (status: UploadStatus | ValidationStatus) => {
-    switch (status) {
-      case "uploaded":
-      case "success":
-        return "border-teal-400";
-      case "upload-error":
-      case "type-error":
-      case "error":
-        return "border-red-300";
-      case "uploading":
-      case "validating":
-        return "border-blue-300";
-      default:
-        return "border-gray-100 dark:border-gray-700";
-    }
-  };
-
-  const getSharePointBoxColor = () => {
-    switch (sharePointStatus) {
-      case "success":
-        return "border-teal-400 shadow-teal-100";
-      case "error":
-        return "border-red-300 shadow-red-100";
-      case "syncing":
-        return "border-blue-300 shadow-blue-100";
-      default:
-        return "border-blue-100 shadow-blue-100 dark:border-gray-700";
-    }
-  };
-
-  // --- Card style for glassmorphism ---
+  // Card style
   const cardStyle =
-    "rounded-2xl border bg-white/80 dark:bg-gray-900/80 backdrop-blur shadow-lg transition hover:shadow-2xl hover:-translate-y-1 duration-400";
+        "hover:shadow-2xl hover:-translate-y-1 transition-all duration-400 bg-white/80 dark:bg-gray-900/80 backdrop-blur rounded-2xl border border-gray-100 dark:border-gray-800";
 
   return (
-    <div className="relative min-h-screen w-full flex flex-col items-center py-10 font-sans 
-      bg-gradient-to-br from-blue-50 via-teal-50 to-white dark:from-gray-950 dark:via-gray-900 dark:to-gray-950 overflow-x-hidden">
+    <div className="relative min-h-screen bg-gradient-to-br from-blue-50 via-teal-50 to-white dark:from-gray-950 dark:via-gray-900 dark:to-gray-950 overflow-x-hidden transition-colors duration-500">
       <BackgroundSVG />
-      <div className="w-full max-w-3xl z-10 relative">
-        {/* Unified Heading */}
+
+      {/* Toggle Button - fixed top right */}
+      <button
+        aria-label="Toggle dark mode"
+        onClick={() => setDark((v) => !v)}
+        className={`fixed z-40 top-5 right-6 rounded-full shadow-lg p-2 transition
+
+
+          ${dark
+            ? "bg-blue-900 text-yellow-400 hover:bg-blue-800"
+            : "bg-blue-100 text-blue-600 hover:bg-blue-200"}
+        `}
+        title={dark ? "Switch to light mode" : "Switch to dark mode"}
+      >
+        {dark ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
+      </button>
+
+      <div className="container mx-auto px-4 py-10 max-w-7xl z-10 relative">
+        {/* Custom Section Heading */}
         <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 via-sky-400 to-teal-400 text-transparent bg-clip-text mb-2 flex items-center gap-3 drop-shadow-lg animate-fade-in">
-          <FilePlus2 className="text-blue-400" size={40} />
-          Standards Document Upload
+          <Brain className="text-blue-400 animate-spin-slow" size={38} />
+          Standards Management Portal
         </h1>
         <p className="text-lg text-gray-600 dark:text-gray-300 mb-10">
           <span className="inline-block bg-gradient-to-r from-blue-100 via-teal-100 to-blue-50 dark:from-blue-900 dark:via-teal-900 dark:to-blue-950 rounded-full px-3 py-1 mr-3 font-semibold text-blue-700 dark:text-blue-200 animate-fade-in">
-            <Folder className="inline-block text-blue-400 mr-1" size={16} />
-            Upload & Validate
+            <FileText className="inline-block text-blue-400 mr-1" size={16} />
+            Monitor & Control
           </span>
-          Seamlessly upload your <span className="font-bold text-blue-500">File</span> standards documents, validate their content, and sync them to your SharePoint repository.
+          One place for standards insight and version governance
         </p>
 
-        {/* MAIN PAGE - Trigger Modal */}
-        <div className="flex flex-col items-center justify-center py-24">
-          <button
-            onClick={() => setModalOpen(true)}
-            className="flex items-center gap-3 px-10 py-4 rounded-2xl bg-gradient-to-r from-blue-600 to-teal-500 text-white text-xl font-bold shadow-xl hover:scale-105 hover:shadow-2xl transition"
-          >
-            <Upload className="w-7 h-7" />
-            Upload & Validate Document
-          </button>
-          <div className="mt-7 text-gray-500 dark:text-gray-400 text-base text-center max-w-xl">
-            <div className="flex items-center justify-center mb-2">
-              <FileText className="text-teal-400 mr-2" />
-              <span>
-                Supports <b>Standard</b> files up to <b>50MB</b> in size.
-              </span>
-            </div>
-            <div>
-              Upload your latest standard drafts or documents for validation and secure archiving in SharePoint. Follow the simple steps in the popup to get your files processed!
-            </div>
+        {/* DASHBOARD SECTION */}
+        <section className="mb-14">
+          <h2 className="text-2xl font-bold text-blue-800 dark:text-blue-200 mb-6 flex items-center gap-2">
+            <Settings className="text-blue-400" />
+            Standards System Overview
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+            {statsCards.map((card, index) => (
+              <Card key={index} className={cardStyle}>
+                <CardHeader className="pb-4">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-lg font-medium text-blue-700 dark:text-blue-200">
+                      {card.title}
+                    </CardTitle>
+                    <div className={`p-2 rounded-full ${card.iconColor}`}>
+                      <card.icon className="h-6 w-6" />
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="pt-0">
+                  <div className="text-3xl font-bold text-blue-900 dark:text-blue-100 mb-1">{card.value}</div>
+                  <p className="text-base text-blue-400 dark:text-blue-300">{card.subtitle}</p>
+                </CardContent>
+              </Card>
+            ))}
           </div>
-        </div>
+        </section>
 
-        {/* MODAL */}
-        <Modal open={modalOpen} onClose={() => setModalOpen(false)}>
-          <div className="flex flex-col md:flex-row gap-0 min-h-[400px]">
-            {/* Left side - Icon and Instructions */}
-            <aside className="w-full md:w-[300px] bg-gradient-to-br from-blue-50 to-teal-50 dark:from-blue-950 dark:to-teal-950 rounded-l-3xl px-6 py-12 flex flex-col items-center shadow-xl">
-              <div className="bg-gradient-to-br from-blue-200 to-teal-200 dark:from-blue-900 dark:to-teal-900 p-5 rounded-2xl shadow mb-4">
-                <FileText className="w-14 h-14 text-blue-500 dark:text-blue-300" />
-              </div>
-              <div className="text-xl font-extrabold text-blue-700 dark:text-blue-200 mb-3 text-center">How It Works</div>
-              <ol className="text-gray-700 dark:text-gray-300 text-base space-y-5 text-left font-medium">
-                <li><span className="font-bold text-blue-500 mr-2">1.</span>Select or <span className="font-bold">drag and drop</span> your <span className="text-blue-500 font-semibold">Files</span> file(s).</li>
-                <li><span className="font-bold text-blue-500 mr-2">2.</span>Each file is <span className="font-bold">uploaded</span> and <span className="font-bold">validated</span> in sequence.</li>
-                <li><span className="font-bold text-blue-500 mr-2">3.</span>Validated documents can be synced to your SharePoint folder.</li>
-              </ol>
-            </aside>
+        {/* VERSION CONTROL SECTION */}
+        <section>
+          <h2 className="text-2xl font-bold text-blue-800 dark:text-blue-200 mb-6 flex items-center gap-2">
+            <Upload className="text-blue-400" />
+            Standards Version Governance
+          </h2>
+          {/* Filters */}
+          <Card className={`${cardStyle} mb-8`}>
+            <CardContent className="p-6">
+              <label className="text-sm font-medium text-blue-700 dark:text-blue-200 mb-2 block">
+                Search Standards or Versions
+              </label>
+              <Input
+                placeholder="Search by name, ID, or version..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full border-blue-200 dark:border-gray-700 focus:ring-blue-300 dark:bg-gray-800 dark:text-blue-100"
+              />
+            </CardContent>
+          </Card>
+          {/* Version History Table (Standard first, then Version) */}
+          <Card className={cardStyle + " mb-8"}>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-lg">
+                Version History
+                <Badge variant="secondary" className="ml-2 bg-gradient-to-r from-blue-100 to-teal-100 dark:from-blue-900 dark:to-teal-900 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-900">
+                  {filteredVersions.length} versions
+                </Badge>
+              </CardTitle>
+              <p className="text-sm text-blue-400 dark:text-blue-300">
+                History of all uploaded versions
+              </p>
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b dark:border-gray-700">
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Standard</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Version</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Uploaded By</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Release Date</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Impact</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Size</th>
+                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredVersions.map((version, index) => (
+                      <tr key={index} className="border-b dark:border-gray-800 hover:bg-gradient-to-r hover:from-blue-50 hover:to-teal-50 dark:hover:from-blue-900 dark:hover:to-teal-900 transition">
+                        <td className="py-3 px-4 font-medium text-blue-900 dark:text-blue-100">{version.standard}</td>
+                        <td className="py-3 px-4 text-blue-700 dark:text-blue-200">{version.version}</td>
+                        <td className="py-3 px-4 text-blue-400 dark:text-blue-300 italic">{version.uploadedBy}</td>
+                        <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{version.releaseDate}</td>
+                        <td className="py-3 px-4">{getImpactBadge(version.impact)}</td>
+                        <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{version.size}</td>
+                                                  <td className="py-3 px-4">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 hover:bg-blue-100 dark:hover:bg-gray-800"
+                              onClick={() => {
+                                const detail = versionDetails.find(
+                                  (d) =>
+                                    d.standard === version.standard &&
+                                    d.version === version.version
+                                );
+                                setModalOpen(true);
+                                setModalDetail(detail || null);
+                              }}
+                            >
+                              <Eye className="h-4 w-4 text-blue-500" />
+                            </Button>
 
-            {/* Right side - Steps */}
-            <section className="w-full md:flex-1 flex flex-col items-center justify-start px-0 py-10 bg-white dark:bg-gray-900 rounded-r-3xl">
-              <div className="w-full max-w-lg flex flex-col gap-5">
-                {/* Upload Card */}
-                <div
-                  className={`${cardStyle} border-blue-200 flex flex-col items-center py-7 px-5`}
-                  onDragOver={e => e.preventDefault()}
-                  onDrop={handleDrop}
-                >
-                  <Upload className="w-10 h-10 text-blue-500 bg-blue-100 dark:bg-blue-900 p-2 rounded-full shadow-lg shadow-blue-100/50 mb-3" />
-                  <div className="text-2xl font-extrabold text-gray-700 dark:text-gray-200 mb-1 text-center">
-                    Upload <span className="text-blue-500">Standard</span> Files
-                  </div>
-                  <div className="text-gray-500 dark:text-gray-300 mb-3 text-sm">
-                    <span className="bg-blue-100 dark:bg-blue-950 px-2 py-1 rounded text-blue-700 dark:text-blue-200 font-medium">Standard</span> only, up to <span className="font-semibold">50MB</span>
-                  </div>
-                  <button
-                    className="inline-flex items-center gap-2 border border-blue-600 bg-gradient-to-r from-blue-500/10 to-teal-400/10 text-blue-700 dark:text-blue-200 font-bold px-7 py-2 rounded-xl mt-2 hover:bg-blue-500 hover:text-white transition-all duration-200 shadow"
-                    onClick={e => {
-                      e.stopPropagation();
-                      fileInputRef.current?.click();
-                    }}                  >
-                    <Upload className="w-5 h-5" />
-                    Select Files
-                  </button>
-                  <input
-                    type="file"
-                    multiple
-                    accept=".doc, .docx"
-                    ref={fileInputRef}
-                    className="hidden"
-                    onChange={handleFileChange}
-                  />
-                </div>
+                            {/* Download Button */}
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 hover:bg-blue-100 dark:hover:bg-gray-800"
+                              onClick={() => {
+                                // For demo: just downloads a dummy file. Replace with real logic.
+                                const blob = new Blob(
+                                  [`Standard: ${version.standard}\nVersion: ${version.version}`],
+                                  { type: 'text/plain' }
+                                );
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = `${version.standard} ${version.version}.txt`;
+                                a.click();
+                                URL.revokeObjectURL(url);
+                              }}
+                            >
+                              <Download className="h-4 w-4 text-blue-500" />
+                            </Button>
 
-                {/* Uploaded Files Card */}
-                <div className={`${cardStyle} border-blue-100 px-6 py-5`}>
-                  <div className="flex items-center mb-2">
-                    <FileText className="mr-2 text-blue-400" />
-                    <span className="font-bold text-base text-gray-700 dark:text-gray-200">Uploaded Files</span>
-                    <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">({files.length})</span>
-                  </div>
-                  {files.length === 0 && (
-                    <div className="text-gray-400 dark:text-gray-600 py-6 text-center text-sm italic rounded-xl bg-white/40 dark:bg-gray-800/40 shadow">
-                      No files uploaded yet. Start by dropping or selecting a <span className="text-blue-500">Files</span> file.
-                    </div>
-                  )}
-                  <div className="flex flex-col gap-3">
-                    {files.map((item, idx) => (
-                      <div
-                        key={item.file.name + item.size + idx}
-                        className={`flex items-start p-4 rounded-2xl border ${getCardBorder(item.uploadStatus)} bg-white/60 dark:bg-gray-900/60 shadow-lg relative`}
-                      >
-                        <FileText className="w-8 h-8 text-teal-400 mr-4 mt-1" />
-                        <div className="flex-1">
-                          <div className="font-bold text-gray-800 dark:text-gray-100">{item.file.name}</div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                            {(item.size / 1024).toFixed(2)} KB
-                          </div>
-                          {item.uploadStatus === "type-error" && (
-                            <div className="flex items-center text-xs text-red-500 mt-1">
-                              <AlertTriangle className="w-4 h-4 mr-1" />
-                              {item.uploadMessage}
-                            </div>
-                          )}
-                          {item.uploadStatus === "upload-error" && (
-                            <div className="flex items-center text-xs text-red-500 mt-1">
-                              <AlertTriangle className="w-4 h-4 mr-1" />
-                              {item.uploadMessage}
-                            </div>
-                          )}
-                          {item.uploadStatus === "uploading" && (
-                            <div className="flex items-center text-xs text-blue-500 mt-1">
-                              <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                              {item.uploadMessage}
-                            </div>
-                          )}
-                          {item.uploadStatus === "uploaded" && (
-                            <div className="flex items-center text-xs text-teal-600 mt-1">
-                              <CheckCircle className="w-4 h-4 mr-1" />
-                              {item.uploadMessage}
-                            </div>
-                          )}
-                        </div>
-                        <button
-                          className="ml-3 text-gray-400 hover:text-red-500 transition"
-                          onClick={() => removeFile(item.file)}
-                          title="Remove"
-                        >
-                          <X className="w-5 h-5" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Validation Card */}
-                <div className={`${cardStyle} border-blue-100 px-6 py-5`}>
-                  <div className="flex items-center mb-2">
-                    <Search className="mr-2 text-teal-400" />
-                    <span className="font-bold text-base text-gray-700 dark:text-gray-200">Validation</span>
-                    <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
-                      ({files.filter(f => f.uploadStatus === "uploaded").length})
-                    </span>
-                  </div>
-                  {files.filter(f => f.uploadStatus === "uploaded").length === 0 && (
-                    <div className="text-gray-400 dark:text-gray-600 py-6 text-center text-sm italic rounded-xl bg-white/40 dark:bg-gray-800/40 shadow">
-                      No files ready for validation yet.
-                    </div>
-                  )}
-                  <div className="flex flex-col gap-3">
-                    {files
-                      .filter(item => item.uploadStatus === "uploaded")
-                      .map((item, idx) => (
-                        <div
-                          key={item.file.name + item.size + idx}
-                          className={`flex items-start p-4 rounded-2xl border ${getCardBorder(item.validationStatus)} bg-white/60 dark:bg-gray-900/60 shadow-lg relative`}
-                        >
-                          <FileText className="w-8 h-8 text-teal-400 mr-4 mt-1" />
-                          <div className="flex-1">
-                            <div className="font-bold text-gray-800 dark:text-gray-100">{item.file.name}</div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                              {(item.size / 1024).toFixed(2)} KB
-                            </div>
-                            <ValidationProgress step={item.validationStep} />
-                            <ul className="space-y-1 mt-2">
-
-                            {/* <-- VALIDATE BUTTON--> */}
-            {item.validationStatus === "idle" && (
-              <button
-                className="flex items-center gap-1 px-3 py-1 mt-2 text-xs border rounded-lg border-teal-500 text-teal-700 dark:border-teal-400 dark:text-teal-300 hover:bg-teal-50 dark:hover:bg-teal-900 transition"
-                onClick={() => validateUploadedFile(item.file)}
-              >
-                <ArrowRight className="w-4 h-4" /> Validate
-              </button>
-            )}
-                              <li className="flex items-center gap-2 text-teal-600 text-sm font-medium">
-                                <CheckCircle className="w-4 h-4" /> File uploaded
-                              </li>
-                              {VALIDATION_STEPS.slice(0, item.validationStep - 1).map((step) => (
-                                <li
-                                  key={step.key}
-                                  className="flex items-center gap-2 text-teal-600 text-sm font-medium"
-                                >
-                                  <CheckCircle className="w-4 h-4" /> {step.label}
-                                </li>
-                              ))}
-                              {item.validationStep > 1 &&
-                                item.validationStep <= VALIDATION_STEPS.length + 1 && (
-                                  <li className="flex items-center gap-2 text-blue-600 text-sm font-medium animate-pulse">
-                                    <Loader2 className="w-4 h-4 animate-spin" />
-                                    {VALIDATION_STEPS[item.validationStep - 2]?.label}
-                                  </li>
-                                )}
-                              {item.validationStatus === "success" && (
-                                <li className="flex items-center gap-2 text-teal-600 text-sm font-medium">
-                                  <CheckCircle className="w-4 h-4" /> Validation complete
-                                </li>
-                              )}
-
-                              {/* INGESTION STEPS */}
-                              {item.validationStatus === "success" && item.ingestionStatus === "processing" && (
-                                <li className="flex items-center gap-2 text-blue-600 text-sm font-medium animate-pulse">
-                                  <Loader2 className="w-4 h-4 animate-spin" /> Ingesting into VectorDB...
-                                </li>
-                              )}
-                              {item.ingestionStatus === "success" && (
-                                <li className="flex items-center gap-2 text-teal-600 text-sm font-medium">
-                                  <CheckCircle className="w-4 h-4" /> Ingested into VectorDB
-                                </li>
-                              )}
-                              {item.ingestionStatus === "skipped" && (
-                                <li className="flex items-center gap-2 text-teal-600 text-sm font-medium">
-                                  <CheckCircle className="w-4 h-4" /> Already exists in VectorDB (skipped)
-                                </li>
-                              )}
-                              {item.ingestionStatus === "error" && (
-                                <li className="flex items-center gap-2 text-red-600 text-sm font-medium">
-                                  <AlertTriangle className="w-4 h-4" /> Ingestion failed
-                                </li>
-                              )}
-
-                              {item.validationStatus === "error" && (
-                                <li className="flex items-center gap-2 text-red-600 text-sm font-medium">
-                                  <AlertTriangle className="w-4 h-4" /> Validation failed
-                                </li>
-                              )}
-                            </ul>
-                            {item.validationStatus === "success" && (
-                              <div className="text-xs text-teal-600 mt-2">{item.validationMessage}</div>
-                            )}
-                            {item.ingestionMessage && (
-                              <div className="text-xs mt-1 text-teal-600">{item.ingestionMessage}</div>
-                            )}
-
-                          </div>
-                          <button
-                            className="ml-3 text-gray-400 hover:text-red-500 transition absolute top-4 right-4"
-                            onClick={() => removeFile(item.file)}
-                            title="Remove"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
-                        </div>
+                          </td>
+                        </tr>
                       ))}
-                  </div>
-                </div>
-
-                {/* SharePoint Sync Card */}
-                <div className={`${cardStyle} ${getSharePointBoxColor()} px-6 py-5 border-2`}>
-                  <div className="flex items-center mb-2">
-                    <Share2 className="mr-2 text-blue-500" />
-                    <span className="font-bold text-base text-gray-700 dark:text-gray-200">
-                      Sync to SharePoint
-                    </span>
-                  </div>
-                                    <button
-                    className={`flex items-center gap-2 px-5 py-2 rounded-xl font-bold text-sm transition
-
-
-                      ${
-                        sharePointStatus === "success"
-                          ? "bg-teal-500 text-white"
-                          : sharePointStatus === "error"
-                          ? "bg-red-500 text-white"
-                          : sharePointStatus === "syncing"
-                          ? "bg-blue-400 text-white"
-                          : "bg-gradient-to-r from-blue-500/10 to-teal-400/10 text-blue-700 dark:text-blue-200 border border-blue-500"
-                      }
-                      shadow hover:scale-105 hover:shadow-lg`}
-                    disabled={sharePointStatus === "syncing"}
-                    onClick={handleSharePointSync}
-                  >
-                    {sharePointStatus === "syncing" ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <Share2 className="w-5 h-5" />
-                    )}
-                    {sharePointStatus === "idle" && "Sync to SharePoint"}
-                    {sharePointStatus === "syncing" && "Syncing..."}
-                    {sharePointStatus === "success" && "Synced!"}
-                    {sharePointStatus === "error" && "Retry Sync"}
-                  </button>
-                  <div className={`text-xs mt-2 transition-all duration-300 
-                    ${sharePointStatus === "success" ? "text-teal-700 dark:text-teal-300" : ""}
-
-
-                    ${sharePointStatus === "error" ? "text-red-500" : ""}
-                    ${sharePointStatus === "syncing" ? "text-blue-600" : ""}
-                  `}>
-                    {sharePointMessage}
-                  </div>
-                  <div className="mt-3 flex items-center gap-2 text-xs text-blue-500">
-                    <FolderOpen className="w-4 h-4" />
-                    <a
-                      href={SHAREPOINT_FOLDER_PATH}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline hover:text-blue-700 flex items-center gap-1"
-                    >
-                      Open SharePoint Folder
-                      <ExternalLink className="w-3 h-3 inline" />
-                    </a>
-                  </div>
-                </div>
+                  </tbody>
+                </table>
               </div>
-            </section>
-          </div>
-        </Modal>
+            </CardContent>
+          </Card>
+        </section>
       </div>
+      <StandardModal open={modalOpen} onClose={() => setModalOpen(false)} detail={modalDetail} />
     </div>
   );
 }
-
-                 
-
-
-
-
-
 
