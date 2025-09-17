@@ -1,83 +1,66 @@
-# --- User symbol mapping ---
-USER_SYMBOLS = {
-    "Harsh": "h",
-    "Person2": "p",
-    "Person3": "y"   # replace this value per user’s local code
-}
-CURRENT_USER = "Person3" 
-
-
-def rename_with_metadata(validated_path: str, content: str, original_ext: str) -> str:
-    """
-    Rename a validated file to: <StandardName>_<Version>_<ReleaseDate>#<UserSymbol>.<ext>
-    Falls back to 'UNKNOWN' if any part is missing.
-    """
-    try:
-        # --- Extract metadata ---
-        standard_match = STANDARD_REGEX.search(content or "")
-        standard_name = (
-            standard_match.group(0).upper().replace(" ", "-") if standard_match else "UNKNOWN"
-        )
-
-        version_date_match = DATE_REGEX.search(content or "")
-        if version_date_match:
-            version = version_date_match.group(0).split()[0].upper()
-            release_date = version_date_match.group(1)
+@router.post("/api/ingest")
+def ingest_file(req: IngestRequest):
+    # --- Try direct match first ---
+    validated_location = os.path.join(VALIDATED_DIR, req.filename)
+    
+    if not os.path.isfile(validated_location):
+        # --- Fallback: search for renamed file ---
+        matches = [
+            f for f in os.listdir(VALIDATED_DIR)
+            if f.startswith(os.path.splitext(req.filename)[0])
+        ]
+        if matches:
+            validated_location = os.path.join(VALIDATED_DIR, matches[0])
         else:
-            version_match = VERSION_REGEX.search(content or "")
-            version = version_match.group(0).upper() if version_match else "UNKNOWN"
-            release_date = "UNKNOWN"
+            return {"success": False, "message": "File not found in validated docs."}
 
-        # --- Add user code ---
-        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
-
-        # --- Build new filename ---
-        new_filename = f"{standard_name}_{version}_{release_date}#{user_symbol}{original_ext}"
-
-        # --- Rename file safely ---
-        new_path = os.path.join(VALIDATED_DIR, new_filename)
-        os.rename(validated_path, new_path)
-
-        return new_filename
-    except Exception as e:
-        # In case of ANY unexpected issue, rename with UNKNOWN
-        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
-        fallback_filename = f"UNKNOWN_UNKNOWN_UNKNOWN#{user_symbol}{original_ext}"
-        new_path = os.path.join(VALIDATED_DIR, fallback_filename)
-        os.rename(validated_path, new_path)
-        return fallback_filename
-
-
-
-@router.post("/api/validate")
-def validate_file(req: ValidateRequest):
-    file_location = os.path.join(UPLOAD_DIR, req.filename)
-    if not os.path.isfile(file_location):
-        return {"is_valid": False, "validation_message": "Not Found"}
-
-    # Run validation
-    is_valid, validation_message = validate_document(file_location)
-
-    if is_valid:
-        ext = os.path.splitext(req.filename)[1].lower()
-
-        # Extract content for renaming
-        if ext == ".docx":
-            content = read_docx(file_location)
-        elif ext == ".doc":
-            content = read_doc(file_location)
-        else:
-            content = ""
-
-        # --- Use the new rename_with_metadata function ---
-        new_filename = rename_with_metadata(file_location, content, ext)
-
-        return {
-            "is_valid": True,
-            "validation_message": validation_message,
-            "validated_location": os.path.join(VALIDATED_DIR, new_filename),
-            "renamed_filename": new_filename
-        }
-
+    # Extract content
+    ext = os.path.splitext(validated_location)[1].lower()
+    if ext == ".docx":
+        content = read_docx(validated_location)
+    elif ext == ".doc":
+        content = read_doc(validated_location)
     else:
-        return {"is_valid": False, "validation_message": validation_message}
+        content = ""
+
+    # Extract standard metadata
+    standard_match = STANDARD_REGEX.search(content)
+    standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
+
+    version_match = VERSION_REGEX.search(content)
+    version = version_match.group(0).upper() if version_match else "V0.0.0"
+
+    release_date_match = DATE_REGEX.search(content)
+    release_date = release_date_match.group(1) if release_date_match else None
+
+    metadata = {
+        "filename": os.path.basename(validated_location),
+        "standard_name": standard_name,
+        "standard_version": version,
+        "release_date": release_date
+    }
+
+    # Ingest as before
+    try:
+        if already_ingested(standard_name, version, persist_dir=PATH_TO_VECTORSTORE):
+            return {
+                "success": False,
+                "message": f"⚠️ Standard '{standard_name}' version '{version}' already exists in vector DB",
+                "metadata": metadata,
+                "skipped": True
+            }
+        else:
+            ingest_text(content, metadata=metadata)
+            return {
+                "success": True,
+                "message": "✅ Ingested successfully into vector DB",
+                "metadata": metadata,
+                "skipped": False
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"❌ Error ingesting: {str(e)}",
+            "metadata": metadata,
+            "skipped": False
+        }
