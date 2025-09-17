@@ -1,5 +1,28 @@
-STANDARD_REGEX = re.compile(r"\b3GPP\s+(TR|TS)\s+[\d\.]+(?:-\d+)?\b", re.IGNORECASE)
+from fastapi import Query
+import time
 
+@router.get("/api/sharepoint-files")
+def list_sharepoint_files(limit: int = Query(50, description="Max files to return")):
+    """
+    List files in SharePoint folder, sorted by latest modified first.
+    Shows filename + last modified time.
+    """
+    try:
+        files = []
+        for f in os.listdir(SHAREPOINT_DIR):
+            fpath = os.path.join(SHAREPOINT_DIR, f)
+            if os.path.isfile(fpath):
+                files.append({
+                    "filename": f,
+                    "last_modified": time.strftime(
+                        "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(fpath))
+                    )
+                })
 
-standard_match = STANDARD_REGEX.search(content or "")
-standard_name = standard_match.group(0).upper() if standard_match else "UNKNOWN"
+        # Sort by last modified descending (newest first)
+        files_sorted = sorted(files, key=lambda x: x["last_modified"], reverse=True)
+
+        return {"files": files_sorted[:limit]}
+
+    except Exception as e:
+        return {"error": f"Could not list SharePoint files: {str(e)}"}
