@@ -1,7 +1,22 @@
- <Button
+useEffect(() => {
+  fetch('/api/sharepoint/files')
+    .then((res) => res.json())
+    .then((data) => setFiles(data.files || []))
+    .catch((err) => console.error('Failed to fetch files:', err));
+}, []);
+
+
+{filteredVersions.map((file, index) => (
+  <tr key={index} className="border-b dark:border-gray-800 hover:bg-gradient-to-r hover:from-blue-50 hover:to-teal-50 dark:hover:from-blue-900 dark:hover:to-teal-900 transition">
+    <td className="py-3 px-4 font-medium text-blue-900 dark:text-blue-100">{file.standard_name}</td>
+    <td className="py-3 px-4 text-blue-700 dark:text-blue-200">{file.standard_version}</td>
+    <td className="py-3 px-4 text-blue-400 dark:text-blue-300 italic">{file.uploaded_by}</td>
+    <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.release_date}</td>
+    <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.size_kb}</td>
+    <td className="py-3 px-4 flex gap-1">
+      <Button
         variant="ghost"
         size="icon"
-        className="h-8 w-8 hover:bg-blue-100 dark:hover:bg-gray-800"
         onClick={() => {
           setModalOpen(true);
           setModalDetail(file);
@@ -9,14 +24,16 @@
       >
         <Eye className="h-4 w-4 text-blue-500" />
       </Button>
-
       <Button
         variant="ghost"
         size="icon"
-        className="h-8 w-8 hover:bg-blue-100 dark:hover:bg-gray-800"
-        onClick={() => {
-          window.open(file.download_url, '_blank');
-        }}
+        onClick={() => window.open(file.download_url, '_blank')}
       >
         <Download className="h-4 w-4 text-blue-500" />
       </Button>
+    </td>
+  </tr>
+))}
+
+
+
