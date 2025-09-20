@@ -1,496 +1,559 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException
-from pydantic import BaseModel
-from typing import List
+import asyncio
 import os
+import httpx
+import sqlite3
+from datetime import datetime
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from mcp.server.fastmcp import FastMCP, Context
+from bs4 import BeautifulSoup  # For parsing HTML page
+from .tools.notifier_tool import send_notification
+import json
+from pathlib import Path
+
+import tempfile
 import shutil
-from docx import Document  # for .docx parsing
-import re
+import zipfile
+from typing import List, Optional
+from docx import Document
+import aiofiles
+
+from pydantic import BaseModel
+
+from dotenv import load_dotenv
+from llm.llm_endpoints import chat_completion
+from langsmith.run_helpers import traceable 
+
+
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_PROJECT"]="Standards-Monitoring-Agent"
+os.environ["LANGCHAIN_API_KEY"]="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"
+
+
+
+load_dotenv()
+# Websocket manager................
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: set[WebSocket] = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.discard(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections.copy():
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+manager = ConnectionManager()
+router = APIRouter()
+mcp = FastMCP("WebsiteMonitor")
+
+DB_PATH = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\telecom_ai.db"
+CONFIG_PATH = Path(r"C:\Users\342534\Desktop\Telecom Standards Management\backend\agents\config\crawler_config.json")
+
+RECIPIENT_EMAILS = [
+    "342534@nttdata.com",
+    "harshitanagaraj.guled@nttdata.com",
+    "neelambuz.singh@nttdata.com"
+]
+
+LATEST_STATUS = ""
+
+def update_latest_status(msg: str):
+    global LATEST_STATUS
+    LATEST_STATUS = msg
+
+# Update print statements to also call this
+def print_and_store(msg: str):
+    update_latest_status(msg)
+    # Broadcast log message to websocket clients
+    try:
+        import asyncio
+        asyncio.create_task(manager.broadcast({"type": "log", "data": msg}))
+    except Exception:
+        pass
+
+async def broadcast_status():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    cfg = read_crawler_config()
+    data = {
+        "filename": row[0] if row else None,
+        "url": row[1] if row else None,
+        "status": row[2] if row else None,
+        "last_checked": row[3] if row else None,
+        "frequency": cfg["crawler_frequency"]
+    }
+    await manager.broadcast({"type": "status", "data": data})
+
+# --- Config helpers ---
+def read_crawler_config():
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH, "r") as f:
+            data = json.load(f)
+            data.setdefault("crawler_active", False)
+            data.setdefault("crawler_frequency", 10)
+            data.setdefault("crawler_url", "https://www.3gpp.org/ftp/specs/archive/23_series/23.002")
+            return data
+    else:
+        return {
+            "crawler_active": False,
+            "crawler_frequency": 10,
+            "crawler_url": "https://www.3gpp.org/ftp/specs/archive/23_series/23.002"
+        }
+
+crawler_wakeup_event = asyncio.Event()
+def write_crawler_config(active: bool = None, frequency: int = None, url: str = None):
+    cfg = read_crawler_config()
+    orig_active = cfg.get("crawler_active", False)
+    if active is not None:
+        cfg["crawler_active"] = active
+    if frequency is not None:
+        cfg["crawler_frequency"] = frequency
+    if url is not None:
+        cfg["crawler_url"] = url
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f)
+    if active is not None and active != orig_active:
+        try:
+            crawler_wakeup_event.set()
+        except Exception:
+            pass
+
+# ------------------------------------------------------
+# summarizer
+# ------------------------------------------------------
+def extract_all_word_from_zip(zip_path: str, extract_dir: str) -> list[str]:
+    word_paths = []
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        for file in zip_ref.namelist():
+            if file.lower().endswith('.docx') or file.lower().endswith('.doc'):
+                extracted_path = zip_ref.extract(file, extract_dir)
+                word_paths.append(os.path.abspath(extracted_path))
+    return word_paths
+
 import docx2txt
 import doc2txt
 
-from agents.utils.rag_pipeline import ingest_text,already_ingested,PATH_TO_VECTORSTORE
-
-router = APIRouter()
-
-# --- Folder paths ---
-UPLOAD_DIR = "temp/uploads"
-VALIDATED_DIR = "Validated_docs"
-SHAREPOINT_DIR = r"C:\Users\342534\NTT DATA North America\GenAI CoE India - Standards"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(VALIDATED_DIR, exist_ok=True)
-os.makedirs(SHAREPOINT_DIR, exist_ok=True)
-
-# --- Validation ---
-# Detect "3GPP TS/TR 23.982/name" in any case (e.g., "3GPP", "3gpp", "3Gpp")
-STANDARD_REGEX = re.compile(r"\b3GPP\s+(TR|TS)\s+[\d\.]+(?:-\d+)?\b", re.IGNORECASE)
-# Detect versions like:
-# v1.0.0, V15.2.0, v2.3, v10.12, v0.3.0 etc.
-VERSION_REGEX = re.compile(r"\b[vV]\s*\d+(?:\.\d+){1,3}\b")
-DATE_REGEX = re.compile(r"\b[Vv]\s*\d+(?:\.\d+){1,3}\b\s*\((\d{4}-\d{2})\)")
-
-
-def read_docx(file_path: str) -> str:
-    """
-    Extract all text from a .docx file, including cover pages.
-    docx2txt is better than python-docx for tables, headers, and formatted text.
-    """
-    try:
-        text = docx2txt.process(file_path) or ""
-        return text
-    except Exception as e:
-        print(f"Error reading .docx file: {e}")
-        return ""
-
-
-def read_doc(file_path: str) -> str:
-    """
-    Extract all text from a legacy .doc file.
-    textract uses antiword or other backends to read old Word files.
-    """
-    try:
-        text = doc2txt.extract_text(file_path)
-        return text
-    except Exception as e:
-        print(f"Error reading .doc file: {e}")
-        return ""
-
-def validate_document(file_path: str) -> (bool, str): # type: ignore
-    try:
-        ext = os.path.splitext(file_path)[1].lower()
-        if ext == ".docx":
-            content = read_docx(file_path)
-        elif ext == ".doc":
-            content = read_doc(file_path)  # fallback for .doc
-        else:
-            return False, "Unsupported file format."
-
-        # --- Regex Validation ---
-        if not STANDARD_REGEX.search(content):
-            return False, "File rejected: Missing '3GPP' standard reference."
-        
-        if not VERSION_REGEX.search(content):
-            return False, "File rejected: Missing version pattern like v1.0.0."
-
-        return True, "Document meets 3GPP validation criteria."
-    except Exception as e:
-        return False, f"File rejected: Could not read file. {str(e)}"
-
-# --- Upload Endpoint ---
-@router.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in [".doc", ".docx"]:
-        raise HTTPException(status_code=400, detail="File rejected: Only .doc or .docx files are allowed.")
-
-    file_location = os.path.join(UPLOAD_DIR, file.filename)
-    with open(file_location, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    return {
-        "filename": file.filename,
-        "message": "Uploaded successfully!"
-    }
-
-
-# --- Validation Endpoint ---
-class ValidateRequest(BaseModel):
-    filename: str
-
-
-# --- User symbol mapping ---
-USER_SYMBOLS = {
-    "Rajdeep": "@",
-    "Harshita": "*",
-    "Neelambuz": "%"   # replace this value per user’s local code
-}
-CURRENT_USER = "Rajdeep" 
-
-
-def rename_with_metadata(validated_path: str, content: str, original_ext: str) -> str:
-    """
-    Rename a validated file to: <StandardName>_<Version>_<ReleaseDate>#<UserSymbol>.<ext>
-    Falls back to 'UNKNOWN' if any part is missing.
-    """
-    try:
-        # --- Extract metadata ---
-        standard_match = STANDARD_REGEX.search(content or "")
-        standard_name = standard_match.group(0).upper() if standard_match else "UNKNOWN"
-
-        version_date_match = DATE_REGEX.search(content or "")
-        if version_date_match:
-            version = version_date_match.group(0).split()[0].upper()
-            release_date = version_date_match.group(1)
-        else:
-            version_match = VERSION_REGEX.search(content or "")
-            version = version_match.group(0).upper() if version_match else "UNKNOWN"
-            release_date = "UNKNOWN"
-
-        # --- Add user code ---
-        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
-
-        # --- Build new filename ---
-        new_filename = f"{standard_name}_{version}_{release_date}#{user_symbol}{original_ext}"
-
-        # --- Rename file safely ---
-        new_path = os.path.join(VALIDATED_DIR, new_filename)
-        os.rename(validated_path, new_path)
-
-        return new_filename
-    except Exception as e:
-        # In case of ANY unexpected issue, rename with UNKNOWN
-        user_symbol = USER_SYMBOLS.get(CURRENT_USER, "x")
-        fallback_filename = f"UNKNOWN_UNKNOWN_UNKNOWN#{user_symbol}{original_ext}"
-        new_path = os.path.join(VALIDATED_DIR, fallback_filename)
-        os.rename(validated_path, new_path)
-        return fallback_filename
-
-from fastapi import WebSocket, WebSocketDisconnect
-from watchfiles import awatch
-from pathlib import Path
-
-
-@router.websocket("/ws/sharepoint")
-async def websocket_sharepoint(ws: WebSocket):
-    """
-    WebSocket that streams updates when files in SHAREPOINT_DIR change.
-    Sends the full updated file list each time.
-    """
-    await ws.accept()
-    try:
-        # Send initial file list
-        await ws.send_json(_get_sharepoint_files_structured())
-
-        async for changes in awatch(SHAREPOINT_DIR):
-            # Any change (added, modified, deleted) triggers an update
-            await ws.send_json(_get_sharepoint_files_structured())
-    except WebSocketDisconnect:
-        print("🔌 Client disconnected from /ws/sharepoint")
-    except Exception as e:
-        print(f"❌ Error in /ws/sharepoint: {e}")
-from typing import Optional
-
-# Map user symbols back to names for frontend
-USER_SYMBOL_TO_NAME = {v: k for k, v in USER_SYMBOLS.items()}
-
-def parse_filename_metadata(filename: str):
-    """
-    Extract standard, version, release date, uploadedBy from filename:
-    Format: <STANDARD>_<VERSION>_<RELEASEDATE>#<USER>.ext
-    """
-    name, _ext = os.path.splitext(filename)
-    try:
-        parts = name.split("_")
-        if len(parts) < 3:
-            return None  # Cannot parse
-
-        standard = parts[0] + ("" if len(parts) == 3 else "_" + "_".join(parts[1:-2]))
-        version = parts[-2]
-        release_user = parts[-1]
-        if "#" in release_user:
-            release_date, user_symbol = release_user.split("#")
-            uploaded_by = USER_SYMBOL_TO_NAME.get(user_symbol, "UNKNOWN")
-        else:
-            release_date = release_user
-            uploaded_by = "UNKNOWN"
-        return {
-            "standard": standard,
-            "version": version,
-            "releaseDate": release_date,
-            "uploadedBy": uploaded_by
-        }
-    except Exception as e:
-        print(f"Error parsing filename metadata: {filename}, {e}")
-        return None
-
-
-
-import platform
-import subprocess
-from fastapi.responses import JSONResponse
-
-# Add this function somewhere in your utilities section
-def open_file_in_os(file_path: str):
-    """Helper function to open a file using the default OS program"""
-    try:
-        system = platform.system()
-        if system == "Windows":
-            os.startfile(file_path)  # The cleanest way on Windows
-        elif system == "Darwin":  # macOS
-            subprocess.run(["open", file_path])
-        elif system == "Linux":
-            subprocess.run(["xdg-open", file_path])
-        else:
-            raise Exception(f"Unsupported operating system: {system}")
-        return True
-    except Exception as e:
-        print(f"Error opening file: {e}")
-        return False
-
-# Add this endpoint to your router (place it with your other endpoints)
-@router.get("/api/open-file/{filename}")
-async def open_file(filename: str):
-    """Endpoint to 'open' a file using the default program (MS Word)"""
-    print(f"🔍 Looking for file: {filename}")  # Debug log
-    
-    try:
-        # Security: Basic check to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-            
-        file_path = os.path.join(SHAREPOINT_DIR, filename)
-        print(f"📁 Full path: {file_path}")  # Debug log
-        
-        if not os.path.isfile(file_path):
-            # Let's see what files ARE in the directory
-            files_in_dir = os.listdir(SHAREPOINT_DIR)
-            print(f"📂 Files in directory: {files_in_dir}")  # Debug log
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        print(f"✅ File found, opening: {file_path}")  # Debug log
-        # This opens the file on the SERVER's machine (your PC)
-        success = open_file_in_os(file_path)
-        
-        if success:
-            return {"message": f"Opening {filename}"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to open file")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-from fastapi import Query
-# Also add this endpoint to get the actual file content for your viewer
-@router.get("/api/get-file-content")
-def get_file_content(filename: str = Query(...)):
-    """
-    Returns the full text content of a validated SharePoint file.
-    """
-    file_path = os.path.join(SHAREPOINT_DIR, filename)
-    if not os.path.isfile(file_path):
-        return JSONResponse(status_code=404, content={"error": "File not found."})
-
+def extract_text_from_word(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
-    try:
-        if ext == ".docx":
-            content = read_docx(file_path)
-        elif ext == ".doc":
-            content = read_doc(file_path)
-        else:
-            return JSONResponse(status_code=400, content={"error": "Unsupported file type."})
-        
-        return {"content": content}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Could not read file: {str(e)}"})
-
-
-def _get_sharepoint_files_structured(limit: int = 50, search: Optional[str] = None):
-    """
-    Return structured info for frontend table.
-    Supports optional search/filter by standard or version.
-    """
-    try:
-        files = []
-        entries = sorted(
-            Path(SHAREPOINT_DIR).glob("*"),
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
-        )
-        for f in entries[:limit]:
-            if f.is_file():
-                meta = parse_filename_metadata(f.name)
-                if not meta:
-                    continue
-                size_kb = round(f.stat().st_size / 1024, 2)
-                meta.update({
-                    "size": f"{size_kb} KB",
-                    "open_url": f"/api/open-file/{f.name}",
-                    "download_url": f"/api/download/{f.name}",
-                    "filename": f.name,  # ← The actual filename on disk
-                    "renamed_filename": f.name  # ← Add this too for consistency
-                })
-                # Apply search filter if given
-                if search:
-                    search_lower = search.lower()
-                    if search_lower not in meta["standard"].lower() and search_lower not in meta["version"].lower():
-                        continue
-                files.append(meta)
-
-        return {"files": files[:limit]}
-    except Exception as e:
-        return {"error": f"Could not list SharePoint files: {str(e)}"}
-
-from fastapi.responses import FileResponse
-@router.get("/api/download/{filename}")
-async def download_file(filename: str):
-    """Endpoint to download a file"""
-    try:
-        # Security: Basic check to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-            
-        file_path = os.path.join(SHAREPOINT_DIR, filename)
-        
-        if not os.path.isfile(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        # Return the file for download
-        return FileResponse(
-            file_path,
-            filename=filename,
-            media_type="application/octet-stream"
-        )
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-from fastapi import Query
-@router.get("/api/sharepoint-files")
-def list_sharepoint_files():
-    return _get_sharepoint_files_structured(limit=None)  # will return all files
-# -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-@router.post("/api/validate")
-def validate_file(req: ValidateRequest):
-    file_location = os.path.join(UPLOAD_DIR, req.filename)
-    if not os.path.isfile(file_location):
-        return {"is_valid": False, "validation_message": "Not Found"}
-
-    # Run validation
-    is_valid, validation_message = validate_document(file_location)
-
-    if is_valid:
-        ext = os.path.splitext(req.filename)[1].lower()
-
-        # Extract content for renaming
-        if ext == ".docx":
-            content = read_docx(file_location)
-        elif ext == ".doc":
-            content = read_doc(file_location)
-        else:
-            content = ""
-
-        # --- Use the new rename_with_metadata function ---
-        new_filename = rename_with_metadata(file_location, content, ext)
-
-        return {
-            "is_valid": True,
-            "validation_message": validation_message,
-            "validated_location": os.path.join(VALIDATED_DIR, new_filename),
-            "renamed_filename": new_filename
-        }
-
-    else:
-        return {"is_valid": False, "validation_message": validation_message}
-    
-class IngestRequest(BaseModel):
-    filename: str
-
-@router.post("/api/ingest")
-def ingest_file(req: IngestRequest):
-    # --- Try direct match first ---
-    validated_location = os.path.join(VALIDATED_DIR, req.filename)
-    
-    if not os.path.isfile(validated_location):
-        # --- Fallback: search for renamed file ---
-        matches = [
-            f for f in os.listdir(VALIDATED_DIR)
-            if f.startswith(os.path.splitext(req.filename)[0])
-        ]
-        if matches:
-            validated_location = os.path.join(VALIDATED_DIR, matches[0])
-        else:
-            return {"success": False, "message": "File not found in validated docs."}
-
-    # Extract content
-    ext = os.path.splitext(validated_location)[1].lower()
     if ext == ".docx":
-        content = read_docx(validated_location)
+        try:
+            return docx2txt.process(file_path) or ""
+        except Exception as e:
+            print(f"Error extracting .docx: {e}")
+            return ""
     elif ext == ".doc":
-        content = read_doc(validated_location)
+        try:
+            return doc2txt.extract_text(file_path) or ""
+        except Exception as e:
+            print(f"Error extracting .doc: {e}")
+            return ""
     else:
-        content = ""
+        return ""
 
-    # Extract standard metadata
-    standard_match = STANDARD_REGEX.search(content)
-    standard_name = standard_match.group(0).upper() if standard_match else "3GPP-UNKNOWN"
+def select_main_word(word_paths: list[str]) -> str | None:
+    max_lines = 0
+    main_word = None
+    for path in word_paths:
+        text = extract_text_from_word(path)
+        lines = [line for line in text.splitlines() if line.strip()]
+        if len(lines) > max_lines:
+            max_lines = len(lines)
+            main_word = path
+    return main_word
 
-    version_match = VERSION_REGEX.search(content)
-    version = version_match.group(0).upper() if version_match else "V0.0.0"
+import re
 
-    release_date_match = DATE_REGEX.search(content)
-    release_date = release_date_match.group(1) if release_date_match else None
+def clean_summary_text(text: str) -> str:
+    # Remove leading *, #, -, + from each line
+    lines = text.splitlines()
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append("")  # preserve blank lines
+            continue
+        # Remove leading markdown bullets/headings
+        cleaned = re.sub(r"^(\*|\-|\+|\#)+\s*", "", stripped)
+        cleaned_lines.append(cleaned)
+    # Remove excessive blank lines
+    result = "\n".join(cleaned_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result)
+    return result.strip()
 
-    metadata = {
-        "filename": os.path.basename(validated_location),
-        "standard_name": standard_name,
-        "standard_version": version,
-        "release_date": release_date
+def save_summary_to_docx(summary: str, comparison: str, filepath: str, doc_name: str) -> None:
+    doc = Document()
+    doc.add_heading(f"Summary for {doc_name}", 0)
+    doc.add_heading("Overview (1-2 pages):", level=1)
+    doc.add_paragraph(summary)
+    doc.save(filepath)
+
+# ---------------------------
+# Database Helpers
+# ---------------------------
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """CREATE TABLE IF NOT EXISTS files (
+               id INTEGER PRIMARY KEY,
+               filename TEXT UNIQUE,
+               url TEXT,
+               status TEXT,
+               last_checked TEXT
+           )"""
+    )
+    conn.commit()
+    conn.close()
+
+def add_file(filename: str, url: str, status: str):
+    current_time = datetime.now().isoformat() 
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        """INSERT INTO files (filename, url, status, last_checked)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(filename) DO UPDATE SET
+               status=excluded.status,
+               last_checked=excluded.last_checked""",
+        (filename, url, status,current_time)
+    )
+    conn.commit()
+    conn.close()
+
+def get_latest_file():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    return {"filename": row[0], "url": row[1], "last_checked": row[2]} if row else None
+# ---------------------------
+# MCP Tools
+# ---------------------------
+
+@traceable
+@mcp.tool()
+async def fetch_url(url: str, ctx: Context) -> str:
+    headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+}
+    async with httpx.AsyncClient(headers=headers) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.text
+
+@traceable
+@mcp.tool()
+def parse_version(html: str, ctx: Context):
+    """Parse the latest .zip file in the folder page by uploaded date"""
+    soup = BeautifulSoup(html, "html.parser")
+    files = []
+    # Each file entry is a <tr> inside <tbody>
+    for row in soup.select("tbody tr"):
+        cols = row.find_all("td")
+        if len(cols) < 5:
+            continue
+        # The filename link is the third <td> (index 2)
+        a_tag = cols[2].find("a", href=True)
+        if not a_tag or not a_tag["href"].endswith(".zip"):
+            continue
+        filename = os.path.basename(a_tag["href"])
+        # The date is the fourth <td> (index 3)
+        date_str = cols[3].get_text(strip=True)
+        try:
+            # Try parsing date, e.g. '2025/06/03 17:49'
+            date_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
+        except Exception:
+            continue  # skip if date not parsable
+        files.append((filename, date_obj))
+    if not files:
+        return None
+    # Sort files by date (descending)
+    files.sort(key=lambda x: x[1], reverse=True)
+    # Return the filename of the latest file
+    return files[0][0]
+
+@traceable
+@mcp.tool()
+def compare_versions(old: str, new: str, ctx: Context):
+    if old != new:
+        return "new version"
+    return "same version"
+
+# ---------------------------
+# Agent Logic
+# ---------------------------
+
+@traceable(run_type="llm")
+def should_crawl_reasoning_llm(last_checked:str , last_file: str, frequency: int,current_time:str) -> bool:
+    """
+    Lightweight agentic reasoning: Should we crawl now?
+    Uses LLM to decide, answer must start with 'yes' or 'no'.
+    """
+    prompt = (
+        f"You are an autonomous standards monitoring agent for 3GPP. "
+        f"Your goal is to efficiently detect updates to the website: "
+        f"- Last checked: {last_checked}\n"
+        f"Current time: {current_time}\n"
+        f"- Last file seen: {last_file}\n"
+        f"- Check frequency (seconds): {frequency}\n"
+        "You must decide whether to crawl the website NOW. "
+        "Crawling too often may waste resources, but missing updates is worse. "
+        "Consider the following:\n"
+        "- If it has been a long time since last check, crawling is more urgent.\n"
+        "- If the last file has not changed for several checks, occasional crawling is still needed to catch updates.\n"
+        "- If frequency is low but there is an important pattern (e.g., frequent updates), crawling may be justified.\n"
+        "Your decision should balance efficiency and vigilance. "
+        "Reply ONLY with 'yes' or 'no' and a short reason. Never be stuck rejecting every crawl."
+    )
+    resp = chat_completion(
+        user_prompt=prompt,
+        system_instruction=(
+            "Decide if the agent should crawl now. "
+            "Always reply with 'yes' or 'no' and a brief reason. "
+            "STRICTLY check If time since last check(in seconds) >= frequency (in seconds), you must definitely reply 'yes'."
+            "Do NOT reject crawling indefinitely; at least crawl occasionally. "
+
+        ))
+    # Only the yes/no part matters for action!
+    return resp.strip().lower().startswith('yes')
+
+@traceable(run_type="llm")
+async def monitor_site():
+
+    ctx = Context()
+    url = read_crawler_config()["crawler_url"]
+    html = await fetch_url(url, ctx)
+    await asyncio.sleep(2)
+    latest_file = os.path.basename(parse_version(html, ctx))
+    if not latest_file:
+        print(f"❌ No .zip files found at {url}")
+        print_and_store(f"❌ No .zip files found at {url}")
+        return
+
+    last_seen = get_latest_file()
+    last_filename = os.path.basename(last_seen["filename"]) if last_seen else None
+    decision = compare_versions(last_filename or "", latest_file, ctx)
+
+    if not url.endswith('/'):
+        url += '/'
+    file_url = url + latest_file
+    add_file(latest_file, url, decision)
+    await broadcast_status()
+
+    if decision == "new version":
+        print(f"🚀 New file detected: {latest_file}")
+        print_and_store(f"🚀 New file detected: {latest_file}")
+        await asyncio.sleep(15)
+
+        # --- BEGIN NEW LOGIC ---
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = os.path.join(temp_dir, latest_file)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(file_url)
+                resp.raise_for_status()
+                async with aiofiles.open(zip_path, 'wb') as f:
+                    await f.write(resp.content)
+            print_and_store(f"Downloaded ZIP to {zip_path}")
+
+            word_paths = extract_all_word_from_zip(zip_path, temp_dir)
+            if not word_paths:
+                print_and_store("No .docx or .doc files found in ZIP.")
+                return
+
+            main_word_path = select_main_word(word_paths)
+            if not main_word_path:
+                print_and_store("Could not determine main Word file.")
+                return
+
+            print_and_store(f"Main Word file selected: {main_word_path}")
+
+            main_text = extract_text_from_word(main_word_path)
+            if not main_text.strip():
+                print_and_store("No extractable text found in Word file.")
+                return
+
+            print_and_store("Generating summary...")
+            await asyncio.sleep(5)
+
+
+            chunk_size = 3000
+            chunks = [main_text[i:i+chunk_size] for i in range(0, len(main_text), chunk_size)]
+            summaries = []
+            for idx, chunk in enumerate(chunks):
+                summary = chat_completion(
+                    user_prompt=f"Summarize the following telecom standard document content (chunk {idx+1}):\n\n{chunk}",
+                    system_instruction="Summarize this technical content for a standards update digest. Focus on key changes, new features, and important scope."
+                )
+                summaries.append(summary)
+            final_summary = "\n\n".join(summaries)
+            print_and_store("Summary generated.")
+            await asyncio.sleep(1.5)
+
+            summary_docx_path = os.path.join(temp_dir, f"summary_{os.path.splitext(latest_file)[0]}.docx")
+            cleaned_summary = clean_summary_text(final_summary)
+            save_summary_to_docx(cleaned_summary, "", summary_docx_path, os.path.basename(main_word_path))
+            print_and_store(f"Summary DOCX saved: {summary_docx_path}")
+
+            subject = f"New 3GPP File Available: {latest_file}"
+            content = (
+                f"<p>Dear Team,</p>"
+                f"<p>We are pleased to inform you that a new version of the 3GPP standard <b>{latest_file}</b> has been uploaded to the official 3GPP website.</p>"
+                f"<p>Please find a brief summary of the document attached in this email, to help you quickly identify what is new.</p>"
+                f"<p>Best regards,<br>Standards Monitoring Automation</p>"
+            )
+
+            print_and_store("Sending Email Notification with summary attached...")
+            for email in RECIPIENT_EMAILS:
+                send_notification(email, subject, content, attachment_path=summary_docx_path)
+            print_and_store("Email Notification sent with summary attached!")
+
+        # All temp files are deleted automatically here
+        # --- END NEW LOGIC ---
+
+    else:
+        print(f"No new file. Current latest: {latest_file}")
+        print_and_store(f"No new file. Current latest: {latest_file}")
+
+
+
+# ---------------------------
+# Background Task
+# ---------------------------
+
+last_active = None
+async def background_monitor():
+    global last_active
+    while True:
+        cfg = read_crawler_config()
+        freq = cfg["crawler_frequency"]
+        if cfg["crawler_active"]:
+            last = get_latest_file()
+            last_checked = last['last_checked'] if last and last['last_checked'] else "never"
+            last_file = last['filename'] if last else "none"
+            # --- AGENTIC DECISION STEP ---
+
+            now = datetime.now().isoformat()  # or your preferred format
+            should_crawl = should_crawl_reasoning_llm(
+                last_checked=last_checked,
+                current_time=now,
+                last_file=last_file,
+                frequency=freq
+            )
+            if should_crawl:
+                try:
+                    await monitor_site()
+                except Exception as e:
+                    print(f"❌ Too many requests to website: {e}")
+                    print_and_store(f"Website is loading....")
+            else:
+                print("Agentic Reasoning: Decided not to crawl this cycle.")
+                print_and_store("Agentic Reasoning: Decided not to crawl this cycle.")
+        else:
+            if last_active != False:
+                print("🔌 Crawler is inactive.")
+                print_and_store("🔌 Crawler is inactive.")
+        last_active = cfg["crawler_active"]
+
+        try:
+            crawler_wakeup_event.clear()
+            await asyncio.wait_for(crawler_wakeup_event.wait(), timeout=freq)
+            continue
+        except asyncio.TimeoutError:
+            pass
+
+# ---------------------------
+# FastAPI Endpoints
+# ---------------------------
+
+@router.get("/monitor/agent")
+async def get_agent_status():
+    cfg = read_crawler_config()
+    return {
+        "active": cfg["crawler_active"],
+        "frequency": cfg["crawler_frequency"],
     }
 
-    # Ingest as before
+class AgentToggleRequest(BaseModel):
+    active: bool
+
+@router.post("/monitor/agent/toggle")
+async def toggle_agent(body: AgentToggleRequest):
+    write_crawler_config(active=body.active)
+    # Send a log message to all clients
+    msg = "🔌 Crawler activated." if body.active else "🔌 Crawler deactivated."
+    print_and_store(msg)
+    await broadcast_status()
+    return {"success": True, "active": body.active}
+
+class AgentUrlRequest(BaseModel):
+    url: str
+
+@router.post("/agent/{id}/url")
+async def set_url(id: int, payload: dict):
+    new_url = payload.get("url")
+    write_crawler_config(url=new_url)
+    await broadcast_status()
+    return {"success": True}
+
+
+class AgentFrequencyRequest(BaseModel):
+    frequency: int  # seconds
+
+@router.post("/agent/{id}/frequency")
+async def set_frequency(id: int, payload: dict):
+    new_freq = payload.get("frequency")
+    write_crawler_config(frequency=new_freq)
+    await broadcast_status()
+    return {"success": True}
+
+@router.get("/monitor/status")
+async def monitor_status():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    cfg = read_crawler_config()
+    return [{
+        "filename": row[0] if row else None,
+        "url": row[1] if row else None,
+        "status": row[2] if row else None,
+        "last_checked": row[3] if row else None,
+        "frequency": cfg["crawler_frequency"]
+    }]
+
+@router.get("/monitor/log")
+def get_latest_log():
+    return {"message": LATEST_STATUS}
+
+@router.websocket("/ws/monitor")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
     try:
-        if already_ingested(standard_name, version, persist_dir=PATH_TO_VECTORSTORE):
-            return {
-                "success": False,
-                "message": f"⚠️ Standard '{standard_name}' version '{version}' already exists in vector DB",
-                "metadata": metadata,
-                "skipped": True
-            }
-        else:
-            ingest_text(content, metadata=metadata)
-            return {
-                "success": True,
-                "message": "✅ Ingested successfully into vector DB",
-                "metadata": metadata,
-                "skipped": False
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "message": f"❌ Error ingesting: {str(e)}",
-            "metadata": metadata,
-            "skipped": False
-        }
+        while True:
+            await websocket.receive_text()  # Optional: keep alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
+# ---------------------------
+# Standalone MCP
+# ---------------------------
 
-# --- SharePoint Sync Endpoint ---
-class SyncRequest(BaseModel):
-    filenames: List[str]
-
-
-@router.post("/api/sharepoint-sync")
-def sharepoint_sync(req: SyncRequest):
-    moved_files = []
-    errors = []
-    for filename in req.filenames:
-        validated_location = os.path.join(VALIDATED_DIR, filename)
-        sharepoint_location = os.path.join(SHAREPOINT_DIR, filename)
-        if not os.path.isfile(validated_location):
-            errors.append(f"{filename} not found in validated docs.")
-            continue
-        try:
-            shutil.move(validated_location, sharepoint_location)
-            moved_files.append(filename)
-        except Exception as e:
-            errors.append(f"{filename}: {str(e)}")
-
-    if errors and not moved_files:
-        return {"message": "No files synced.", "errors": errors}
-    elif errors:
-        return {"message": "Some files synced.", "synced": moved_files, "errors": errors}
-    else:
-        return {"message": "Synced successfully to SharePoint!", "synced": moved_files}
-
-
-# --- List Endpoints ---
-@router.get("/api/list-validated")
-def list_validated():
-    return {"files": os.listdir(VALIDATED_DIR)}
-
-
-# @router.get("/api/list-sharepoint")
-# def list_sharepoint():
-#     return {"files": os.listdir(SHAREPOINT_DIR)}
+if __name__ == "__main__":
+    init_db()
+    asyncio.run(background_monitor())
+    # For MCP CLI: mcp.run("stdio")
