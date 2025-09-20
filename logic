@@ -1,86 +1,66 @@
 import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import {
-  FileText, Settings, Eye, X, Brain, Upload, Sun, Moon, Download
+  Zap,
+  Settings,
+  CheckCircle,
+  Clock,
 } from 'lucide-react';
 
-
-
-export function WordViewerModal({
-  open,
-  onClose,
-  filename,
-  downloadUrl
-}: {
-  open: boolean;
-  onClose: () => void;
-  filename: string;
-  downloadUrl: string;
-}) {
-  const [content, setContent] = useState<string>("Loading...");
-  const [loading, setLoading] = useState<boolean>(true);
-
-  useEffect(() => {
-    if (open && filename) {
-      setLoading(true);
-      fetch(`http://localhost:8000/api/get-file-content?filename=${encodeURIComponent(filename)}`)
-        .then(res => res.json())
-        .then(data => {
-          setContent(data.content || "No content found.");
-          setLoading(false);
-        })
-        .catch(err => {
-          console.error(err);
-          setContent("Error loading content.");
-          setLoading(false);
-        });
-    }
-  }, [open, filename]);
-
+// Modal with backdrop blur and smooth fade
+function Modal({ open, onClose, children }) {
   if (!open) return null;
-
   return (
-    <div className="fixed z-50 inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-      <div className="bg-white dark:bg-gray-900 rounded-2xl w-11/12 max-w-4xl p-6 shadow-2xl relative flex flex-col max-h-[80vh]">
-        <button
-          className="absolute top-3 right-3 rounded-full hover:bg-gray-200 dark:hover:bg-gray-800 p-1"
-          onClick={onClose}
-        >
-          <X className="w-6 h-6 text-gray-700 dark:text-gray-200" />
-        </button>
-        <div className="flex justify-between items-center mb-3">
-          <h3 className="font-bold text-xl text-gray-800 dark:text-gray-100">{filename}</h3>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.open(downloadUrl, "_blank")}
-          >
-            <Download className="w-4 h-4 mr-1" />
-            Download
-          </Button>
-        </div>
-        <div className="overflow-y-auto flex-1 border border-gray-200 dark:border-gray-700 p-4 rounded-lg bg-white dark:bg-gray-950 font-sans text-gray-900 dark:text-gray-100 whitespace-pre-wrap leading-relaxed text-sm">
-          {loading ? "Loading content..." : content}
-        </div>
+    <div
+      className="fixed inset-0 flex items-center justify-center z-50 bg-black/30 backdrop-blur-sm transition-all animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-2xl p-8 min-w-[340px] max-w-[96vw] max-h-[90vh] animate-modal-pop overflow-y-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        {children}
       </div>
     </div>
   );
 }
 
-// Animated blue/teal glassy background
+// Helper for avatar initials
+function getStandardInitials(name) {
+  return name.split(' ').map(w => w[0]).join('').slice(0, 3).toUpperCase();
+}
+
+// Modern, animated status badge
+function StatusBadge({ active }) {
+  return (
+    <Badge
+      className={`ml-1 px-2 py-0.5 rounded-full text-xs font-bold border transition-colors duration-300 shadow-sm
+
+
+      ${active
+        ? 'bg-gradient-to-r from-green-400 to-green-600 text-white border-green-500 animate-pulse-slow'
+        : 'bg-gradient-to-r from-gray-200 to-gray-400 text-gray-600 border-gray-300'
+      }`}
+    >
+      {active ? 'Active' : 'Inactive'}
+    </Badge>
+  );
+}
+
+// Animated background SVG
 function BackgroundSVG() {
   return (
-    <svg className="fixed inset-0 pointer-events-none z-0 w-full h-full" width="100%" height="100%">
+    <svg className="absolute inset-0 pointer-events-none z-0 w-full h-full" width="100%" height="100%">
       <defs>
         <radialGradient id="bg-gradient-1" cx="50%" cy="50%" r="80%">
-          <stop offset="0%" stopColor="#c7d2fe" stopOpacity="0.23" />
+          <stop offset="0%" stopColor="#c7d2fe" stopOpacity="0.3" />
           <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
         </radialGradient>
         <radialGradient id="bg-gradient-2" cx="50%" cy="50%" r="80%">
-          <stop offset="0%" stopColor="#bae6fd" stopOpacity="0.18" />
+          <stop offset="0%" stopColor="#bae6fd" stopOpacity="0.3" />
           <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
         </radialGradient>
       </defs>
@@ -90,421 +70,412 @@ function BackgroundSVG() {
   );
 }
 
-const statsCards = [
+const workflowsData = [
   {
-    title: 'Total Standards',
-    value: '247',
-    subtitle: 'in this month',
-    icon: FileText,
-    iconColor: 'text-blue-500 bg-blue-100 dark:bg-blue-900',
-  },
-  {
-    title: 'Active Workflows',
-    value: '8',
-    subtitle: 'running',
-    icon: Settings,
-    iconColor: 'text-blue-500 bg-blue-100 dark:bg-blue-900',
+    id: 1,
+    name: '3GPP Standards Monitor',
+    description: 'Automatically detect new 3GPP releases and trigger document mapping workflow',
+    actionStatus: 'New version detected',
+    notifyStakeholder: true,
+    lastRun: '2024-06-28 14:30',
+    frequency: 15,
+    isActive: true,
+    monitoredStandards: ['3GPP TS 23.002'],
+    type: '3gpp',
+    url: '',
   },
 ];
 
-// const versionsData = [
-//   {
-//     version: 'v17.9.0',
-//     standard: '3GPP TS 23.501',
-//     releaseDate: '2024-06-15',
-//     impact: 'major',
-//     size: '2.4MB',
-//     uploadedBy: 'Harshita Nagaraj Guled',
-//   },
-//   {
-//     version: 'v17.8.0',
-//     standard: '3GPP TS 23.501',
-//     releaseDate: '2024-03-20',
-//     impact: 'minor',
-//     size: '2.3MB',
-//     uploadedBy: 'Neelambuz Singh',
-//   },
-//   {
-//     version: 'v17.10.0-draft',
-//     standard: '3GPP TS 23.501',
-//     releaseDate: '2024-07-01',
-//     impact: 'major',
-//     size: '2.5MB',
-//     uploadedBy: 'Rajdeep Roshan Sahu',
-//   },
-// ];
+export default function WorkflowAutomation() {
+  const [workflows, setWorkflows] = useState(workflowsData);
+  const [editingId, setEditingId] = useState(null);
+  const [editFrequency, setEditFrequency] = useState(0);
 
-// const versionDetails = [
-//   {
-//     id: '3GPP TS 23.501 v17.9.0',
-//     standard: '3GPP TS 23.501',
-//     version: 'v17.9.0',
-//     releaseDate: '2024-06-15',
-//     author: '3GPP SA2',
-//     size: '2.4 MB',
-//     keyChanges: [
-//       'Enhanced 5G Core network procedures',
-//       'New service continuity mechanisms',
-//       'Updated security protocols'],
-//     controlPlanePolicies: [
-//       "Strict authentication for control messages",
-//       "Dynamic resource allocation policy",
-//       "Unified session management policy"
-//     ],
-//   },
-//   {
-//     id: '3GPP TS 23.501 v17.8.0',
-//     standard: '3GPP TS 23.501',
-//     version: 'v17.8.0',
-//     releaseDate: '2024-03-20',
-//     author: '3GPP SA2',
-//     size: '2.3 MB',
-//     keyChanges: [
-//       'Network slicing improvements',
-//       'Edge computing enhancements',
-//       'Bug fixes for roaming scenarios',
-//     ],
-//     controlPlanePolicies: [
-//       "Legacy control signaling support",
-//       "Basic resource allocation policy",
-//       "Manual session management policy"],
-//   },
-//   {
-//     id: '3GPP TS 23.501 v17.10.0-draft',
-//     standard: '3GPP TS 23.501',
-//     version: 'v17.10.0-draft',
-//     releaseDate: '2024-07-01',
-//     author: '3GPP SA2',
-//     size: '2.5 MB',
-//     keyChanges: [
-//       'Draft: Early 5G Core feature integration',
-//       'Planned security updates',
-//       'Service orchestration improvements',
-//     ],
-//     controlPlanePolicies: [
-//       "Draft: Dynamic session policy",
-//       "Planned unified resource allocation",
-//       "Upcoming authentication mechanism"
-//     ],
-//   },
-// ];
+  // Backend-driven crawler status for 3gpp
+  const [crawlerStatus, setCrawlerStatus] = useState({ active: false, lastRun: '', lastStatus: '' });
+  const [latestLog, setLatestLog] = useState('');
+  const [backendFrequency, setBackendFrequency] = useState(15);
+  const [editStandardName, setEditStandardName] = useState('');
+  const [editUrl, setEditUrl] = useState('');
 
-// BADGES
-const getImpactBadge = (impact: string) => {
-  switch (impact) {
-    case 'major':
-      return (
-        <Badge className="bg-gradient-to-r from-blue-500 to-teal-400 text-white font-semibold px-2 border border-blue-400 rounded-full">
-          major
-        </Badge>
-      );
-    case 'minor':
-      return (
-        <Badge className="bg-gradient-to-r from-blue-100 to-teal-100 text-blue-700 font-semibold px-2 border border-blue-200 rounded-full">
-          minor
-        </Badge>
-      );
-    default:
-      return <Badge className="rounded-full">{impact}</Badge>;
-  }
-};
 
-// Modal for standard details
-function StandardModal({
-  open,
-  onClose,
-  detail,
-}: {
-  open: boolean;
-  onClose: () => void;
-  detail: any;
-}) {
-  if (!open || !detail) return null;
-  return (
-    <div className="fixed z-50 inset-0 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-      <div className="bg-white/90 dark:bg-gray-900/90 rounded-2xl max-w-lg w-full p-7 shadow-2xl border border-blue-100 dark:border-gray-800 relative animate-fade-in">
-        <button
-          className="absolute top-3 right-3 rounded-full hover:bg-blue-100 dark:hover:bg-gray-800 p-1"
-          onClick={onClose}
-        >
-          <X className="w-6 h-6 text-blue-400" />
-        </button>
-        <div className="flex items-center gap-3 mb-3">
-          <FileText className="h-7 w-7 text-blue-400" />
-          <span className="font-extrabold text-2xl text-blue-800 dark:text-blue-100">{detail.standard}</span>
-          <span className="ml-auto px-3 py-1 rounded-full bg-gradient-to-r from-blue-100 to-teal-100 dark:from-blue-900 dark:to-teal-900 text-blue-700 dark:text-blue-200 text-xs font-bold">{detail.version}</span>
-        </div>
-        <div className="text-blue-500 dark:text-blue-300 mb-3 text-sm">
-          Released on {detail.releaseDate} by {detail.author}
-        </div>
-        <div>
-          <h4 className="font-medium text-blue-700 dark:text-blue-200 mb-2">Key Changes:</h4>
-          <ul className="space-y-1 mb-3">
-            {detail.keyChanges.map((change: string, idx: number) => (
-              <li key={idx} className="text-sm text-blue-800 dark:text-blue-100 flex items-start gap-2">
-                <span className="w-1 h-1 bg-blue-500 rounded-full mt-2 flex-shrink-0"></span>
-                {change}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h4 className="font-medium text-blue-700 dark:text-blue-200 mb-2">New Control-plane Requirements:</h4>
-          <ul className="space-y-1">
-            {detail.controlPlanePolicies.map((policy: string, idx: number) => (
-              <li key={idx} className="text-sm text-blue-800 dark:text-blue-100 flex items-start gap-2">
-                <span className="w-1 h-1 bg-blue-500 rounded-full mt-2 flex-shrink-0"></span>
-                {policy}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// --- DARK MODE HOOK ---
-function usePageDarkMode() {
-  const [dark, setDark] = useState(false);
-
-  // On mount: use prefers-color-scheme, then localStorage
+  // WebSocket for live backend status/log
   useEffect(() => {
-    // First check localStorage
-    const stored = localStorage.getItem('standards-darkmode');
-    if (stored === 'true') setDark(true);
-    else if (stored === 'false') setDark(false);
-    else if (window.matchMedia('(prefers-color-scheme: dark)').matches) setDark(true);
+    const ws = new WebSocket('ws://localhost:8000/ws/monitor');
+    ws.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'log') {
+          setLatestLog(payload.data || '');
+        }
+        if (payload.type === 'status') {
+          setBackendFrequency(payload.data.frequency);
+          setCrawlerStatus(s => ({
+            ...s,
+            lastRun: payload.data.last_checked,
+            lastStatus: payload.data.status,
+          }));
+        }
+      } catch (e) {
+        // Optionally handle JSON parse error
+      }
+    };
+    ws.onclose = () => {
+      // Optionally handle close event
+    };
+    return () => ws.close();
   }, []);
 
+  // On mount, fetch initial backend state for 3gpp agent
   useEffect(() => {
-    // Toggle dark class on document.documentElement for this page
-    if (dark) document.documentElement.classList.add('dark');
-    else document.documentElement.classList.remove('dark');
-    localStorage.setItem('standards-darkmode', dark ? 'true' : 'false');
-  }, [dark]);
+    // Fetch crawler active/inactive status
+    fetch('http://localhost:8000/monitor/agent')
+      .then(res => res.json())
+      .then(data => {
+        setCrawlerStatus(s => ({ ...s, active: data.active }));
+        setWorkflows(wfs =>
+          wfs.map(w =>
+            w.type === '3gpp'
+              ? { ...w, isActive: data.active }
+              : w
+          )
+        );
+      });
 
-  return [dark, setDark] as const;
-}
-
-export default function StandardsManagementPage() {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [modalDetail, setModalDetail] = useState<any>(null);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [dark, setDark] = usePageDarkMode();
-  const [viewerOpen, setViewerOpen] = useState(false);
-  const [viewerFilename, setViewerFilename] = useState("");
-  const [viewerDownloadUrl, setViewerDownloadUrl] = useState("");
-
-  const [files, setFiles] = useState<any[]>([]);
-
-  const handleOpenFile = async (filename) => {
-  try {
-    // This calls your FastAPI endpoint, which opens the file locally
-    const response = await fetch(`http://localhost:8000/api/open-file/${encodeURIComponent(filename)}`, {
-      method: 'GET'
-    });
-    
-    if (response.ok) {
-      console.log(`Requested to open ${filename}`);
-      // The file is now opening on the server's machine (your PC)
-    } else {
-      console.error('Failed to open file');
+    // Fetch latest run/status info
+    fetch('http://localhost:8000/monitor/status')
+  .then(res => res.json())
+  .then(arr => {
+    if (arr.length) {
+      setCrawlerStatus(s => ({
+        ...s,
+        lastRun: arr[0].last_checked,
+        lastStatus: arr[0].status
+      }));
+      setBackendFrequency(arr[0].frequency);
+      setWorkflows(wfs =>
+        wfs.map(w =>
+          w.type === '3gpp'
+            ? {
+                ...w,
+                lastRun: arr[0].last_checked,
+                frequency: arr[0].frequency,
+                url: arr[0].monitoring_url // <-- update url!
+              }
+            : w
+        )
+      );
     }
-  } catch (error) {
-    console.error('Error:', error);
-  }
-};
-
-const handleDownload = async (filename) => {
-  try {
-    const response = await fetch(`http://localhost:8000/api/download/${encodeURIComponent(filename)}`);
-    const blob = await response.blob();
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.style.display = 'none';
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
-  } catch (error) {
-    console.error('Download failed:', error);
-  }
-};
-
-
-  useEffect(() => {
-  fetch('http://localhost:8000/api/sharepoint-files')
-    .then((res) => res.json())
-    .then((data) => setFiles(data.files || []))
-    .catch((err) => console.error('Failed to fetch files:', err));
+  });
   }, []);
 
-  const filteredVersions = files.filter((file) => {
-  return (
-    file.standard.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    file.version.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    file.uploadedBy.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-});
+  // Toggle 3gpp agent via backend
+  const toggleCrawler = async () => {
+    await fetch('http://localhost:8000/monitor/agent/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: !crawlerStatus.active }),
+    });
+    setCrawlerStatus(s => ({ ...s, active: !s.active }));
+    setWorkflows(wfs =>
+      wfs.map(w =>
+        w.type === '3gpp'
+          ? { ...w, isActive: !w.isActive }
+          : w
+      )
+    );
+  };
 
-  // Card style
+  // Open modal to edit frequency
+  const openEdit = (workflow) => {
+  setEditingId(workflow.id);
+  setEditFrequency(workflow.type === '3gpp' ? backendFrequency : workflow.frequency);
+  setEditStandardName(workflow.monitoredStandards[0] || '');
+  setEditUrl(workflow.url || ''); // Add this line
+};
+
+
+  // Save frequency (calls backend for 3gpp)
+  const saveFrequency = async () => {
+  if (editingId === 1) { // 3GPP agent
+    await fetch(`http://localhost:8000/agent/${editingId}/frequency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frequency: editFrequency }),
+    });
+    await fetch(`http://localhost:8000/agent/${editingId}/standard_name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ standard_name: editStandardName }),
+    });
+    await fetch(`http://localhost:8000/agent/${editingId}/url`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: editUrl }),
+    });
+    setBackendFrequency(editFrequency);
+    setWorkflows(ws =>
+      ws.map(w =>
+        w.id === editingId
+          ? {
+              ...w,
+              frequency: editFrequency,
+              monitoredStandards: [editStandardName],
+              url: editUrl
+            }
+          : w
+      )
+    );
+  } else {
+    setWorkflows(ws =>
+      ws.map(w =>
+        w.id === editingId
+          ? {
+              ...w,
+              frequency: editFrequency,
+              monitoredStandards: [editStandardName],
+              url: editUrl
+            }
+          : w
+      )
+    );
+  }
+  setEditingId(null);
+};
+
   const cardStyle =
-        "hover:shadow-2xl hover:-translate-y-1 transition-all duration-400 bg-white/80 dark:bg-gray-900/80 backdrop-blur rounded-2xl border border-gray-100 dark:border-gray-800";
+    "hover:shadow-2xl hover:-translate-y-1 transition-all duration-400 bg-white/80 backdrop-blur rounded-2xl border border-gray-100 w-full max-w-[700px] mx-auto min-h-[420px] max-h-[650px] flex flex-col";
+  const cardContentStyle = "space-y-7 flex-1";
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-br from-blue-50 via-teal-50 to-white dark:from-gray-950 dark:via-gray-900 dark:to-gray-950 overflow-x-hidden transition-colors duration-500">
+    <div
+      className="relative min-h-screen min-w-full flex flex-col items-center justify-center overflow-hidden"
+      style={{
+        background: "linear-gradient(135deg, #f4fbff 0%, #e0f2fe 100%)"
+      }}
+    >
+      {/* Animated background */}
       <BackgroundSVG />
 
-      {/* Toggle Button - fixed top right */}
-      <button
-        aria-label="Toggle dark mode"
-        onClick={() => setDark((v) => !v)}
-        className={`fixed z-40 top-5 right-6 rounded-full shadow-lg p-2 transition
+            <div className="relative z-10 w-full max-w-5xl mx-auto px-4 pb-14 pt-10">
+        {/* Page Header */}
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-10 w-full">
+          <div>
+            <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 via-sky-400 to-teal-400 text-transparent bg-clip-text mb-2 flex items-center gap-3 drop-shadow-lg animate-fade-in">
+              <Zap className="text-blue-500" size={38} />
+              Workflow Automation
+            </h1>
+            <p className="text-lg text-gray-600">
+              <span className="inline-block bg-gradient-to-r from-blue-100 via-teal-100 to-blue-50 rounded-full px-3 py-1 mr-3 font-semibold text-blue-700 animate-fade-in">
+                <CheckCircle className="inline-block text-blue-400 mr-1" size={16} />
+                Automated Standards Management
+              </span>
+              Automate document workflows when new standards are released
+            </p>
+          </div>
+        </div>
+
+        {/* Workflow Cards */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 w-full">
+          {/* 3GPP Standards Monitor */}
+          {workflows.filter(w => w.type === '3gpp').map((workflow) => (
+            <Card key={workflow.id} className={cardStyle}>
+              <CardHeader className="pb-4">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-3 mb-2">
+                      <CardTitle className="text-2xl font-bold flex items-center gap-2">
+                        <Zap className="text-blue-400" size={28} />
+                        {workflow.name}
+                      </CardTitle>
+                      <StatusBadge active={crawlerStatus.active} />
+                    </div>
+                    <p className="text-md text-gray-500 font-medium">{workflow.description}</p>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className={cardContentStyle}>
+                {/* Monitored Standards */}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs font-semibold text-gray-700">
+                    <Zap className="h-4 w-4 text-cyan-500" />
+                    Monitored Standard:
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-1">
+                    {workflow.monitoredStandards.map((standard, sidx) => (
+                      <Badge
+                        key={sidx}
+                        variant="outline"
+                        className="text-xs flex items-center gap-1 px-2 py-1 bg-gradient-to-r from-blue-100 to-teal-100 border-blue-200 text-blue-700"
+                      >
+                        <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-blue-200 text-blue-700 font-bold text-xs mr-1 shadow">
+                          {getStandardInitials(standard)}
+                        </span>
+                        {standard}
+                      </Badge>
+                    ))}
+                  </div>
+                    {/* Add monitored URL below the standards */}
+                    <div className="mt-2">
+                      <div className="flex items-center gap-2 text-xs font-semibold text-gray-700">
+                        <Zap className="h-3 w-3 text-cyan-500" />
+                        Monitored URL:
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className="text-xs flex items-center gap-1 px-2 py-1 bg-gradient-to-r from-blue-100 to-teal-100 border-blue-200 text-blue-700 break-all"
+                      >
+                        <a target="_blank" rel="noopener noreferrer">
+                          {workflow.url}
+                        </a>
+                      </Badge>
+                    </div>
+                    </div>
 
 
-          ${dark
-            ? "bg-blue-900 text-yellow-400 hover:bg-blue-800"
-            : "bg-blue-100 text-blue-600 hover:bg-blue-200"}
-        `}
-        title={dark ? "Switch to light mode" : "Switch to dark mode"}
-      >
-        {dark ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
-      </button>
-
-      <div className="container mx-auto px-4 py-10 max-w-7xl z-10 relative">
-        {/* Custom Section Heading */}
-        <h1 className="text-4xl font-extrabold bg-gradient-to-r from-blue-600 via-sky-400 to-teal-400 text-transparent bg-clip-text mb-2 flex items-center gap-3 drop-shadow-lg animate-fade-in">
-          <Brain className="text-blue-400 animate-spin-slow" size={38} />
-          Standards Management Portal
-        </h1>
-        <p className="text-lg text-gray-600 dark:text-gray-300 mb-10">
-          <span className="inline-block bg-gradient-to-r from-blue-100 via-teal-100 to-blue-50 dark:from-blue-900 dark:via-teal-900 dark:to-blue-950 rounded-full px-3 py-1 mr-3 font-semibold text-blue-700 dark:text-blue-200 animate-fade-in">
-            <FileText className="inline-block text-blue-400 mr-1" size={16} />
-            Monitor & Control
-          </span>
-          One place for standards insight and version governance
-        </p>
-
-        {/* DASHBOARD SECTION */}
-        <section className="mb-14">
-          <h2 className="text-2xl font-bold text-blue-800 dark:text-blue-200 mb-6 flex items-center gap-2">
-            <Settings className="text-blue-400" />
-            Standards System Overview
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-            {statsCards.map((card, index) => (
-              <Card key={index} className={cardStyle}>
-                <CardHeader className="pb-4">
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-lg font-medium text-blue-700 dark:text-blue-200">
-                      {card.title}
-                    </CardTitle>
-                    <div className={`p-2 rounded-full ${card.iconColor}`}>
-                      <card.icon className="h-6 w-6" />
+                {/* Actions */}
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-gray-800">Actions:</div>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3 text-sm">
+                      <CheckCircle className={`h-4 w-4 ${crawlerStatus.active ? 'text-green-500' : 'text-gray-400'}`} />
+                      <span className={crawlerStatus.active ? 'text-gray-800' : 'text-gray-400'}>
+                        Trigger: New Version Detection
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-sm">
+                      <CheckCircle className={`h-4 w-4 ${crawlerStatus.active ? 'text-green-500' : 'text-gray-400'}`} />
+                      <span className={crawlerStatus.active ? 'text-gray-800' : 'text-gray-400'}>
+                        Stakeholder notification
+                      </span>
                     </div>
                   </div>
-                </CardHeader>
-                <CardContent className="pt-0">
-                  <div className="text-3xl font-bold text-blue-900 dark:text-blue-100 mb-1">{card.value}</div>
-                  <p className="text-base text-blue-400 dark:text-blue-300">{card.subtitle}</p>
-                </CardContent>
-              </Card>
-            ))}
+                </div>
+
+                {/* Latest Log */}
+                {latestLog && (
+                  <div className="py-2 px-3 text-sm font-medium text-blue-700 bg-blue-50 rounded border border-blue-100 shadow animate-fade-in">
+                    {latestLog}
+                  </div>
+                )}
+
+                {/* Run Details */}
+                <div className="grid grid-cols-2 gap-4 pt-4 border-t">
+                  <div>
+                    <div className="text-xs text-gray-400 mb-1">Last Run:</div>
+                    <div className="text-sm font-semibold text-gray-700 flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {crawlerStatus.lastRun || 'N/A'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-gray-400 mb-1">Frequency (seconds):</div>
+                    <div className="text-sm font-semibold text-gray-700">
+                      {backendFrequency}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer Actions */}
+                <div className="flex items-center justify-between pt-4 border-t">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={crawlerStatus.active}
+                      onCheckedChange={toggleCrawler}
+                    />
+                    <span className="text-sm text-gray-500">
+                      {crawlerStatus.active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => openEdit(workflow)}
+                    >
+                      <Settings className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+
+          {/* Agent Health & Suggestions Card */}
+          <Card className={cardStyle + " flex items-center justify-center"}>
+          <CardContent className="flex flex-col items-center justify-center h-full py-12">
+            <div className="flex items-center gap-2 mb-3">
+              <Zap className={`h-8 w-8 ${crawlerStatus.active ? "text-teal-500 animate-pulse-slow" : "text-gray-300"}`} />
+              <span className={`font-bold text-lg ${crawlerStatus.active ? "text-teal-700" : "text-gray-400"}`}>Agent Health</span>
+            </div>
+            <div className={`font-medium mb-1 flex items-center gap-1 ${crawlerStatus.active ? "text-green-600" : "text-gray-400"}`}>
+              <span className={`w-2 h-2 rounded-full ${crawlerStatus.active ? "bg-green-400 animate-pulse" : "bg-gray-300"}`}></span>
+              {crawlerStatus.active ? "Online & Healthy" : "Offline"}
+            </div>
+            <p className="text-gray-600 text-center max-w-xs mb-3">
+              {crawlerStatus.active
+                ? "Your automation agent is running. All systems are operational!"
+                : "Your automation agent is currently offline. Enable it to resume monitoring and automations."
+              }
+            </p>
+            <ul className="text-xs text-gray-500 mb-3 space-y-1">
+              <li>• Tip: You’ll be notified when new standards are published.</li>
+              <li>• More workflow types coming soon.</li>
+            </ul>
+            <Button variant="outline" disabled>
+              Explore More Automations
+            </Button>
+          </CardContent>
+        </Card>
+        </div>
+
+        {/* Modal for Editing Frequency */}
+        <Modal open={editingId !== null} onClose={() => setEditingId(null)}>
+          <div className="mb-4">
+            <h2 className="text-xl font-bold mb-1 flex items-center gap-2">
+              <Settings className="h-5 w-5 text-blue-500" />
+              Edit Run Frequency
+            </h2>
+            <p className="text-gray-500 text-sm mb-2">
+              Set how often the agent checks for new standards (in seconds).
+            </p>
+            <input
+              type="number"
+              className="border px-3 py-2 rounded w-full"
+              value={editFrequency}
+              min={5}
+              max={3600}
+              onChange={e => setEditFrequency(Number(e.target.value))}
+            />
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Standard Name
+            </label>
+            <input
+              type="text"
+              className="border px-3 py-2 rounded w-full mb-4"
+              value={editStandardName}
+              onChange={e => setEditStandardName(e.target.value)}
+            />
           </div>
-        </section>
-
-        {/* VERSION CONTROL SECTION */}
-        <section>
-          <h2 className="text-2xl font-bold text-blue-800 dark:text-blue-200 mb-6 flex items-center gap-2">
-            <Upload className="text-blue-400" />
-            Standards Version Governance
-          </h2>
-          {/* Filters */}
-          <Card className={`${cardStyle} mb-8`}>
-            <CardContent className="p-6">
-              <label className="text-sm font-medium text-blue-700 dark:text-blue-200 mb-2 block">
-                Search Standards or Versions
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Monitored URL
               </label>
-              <Input
-                placeholder="Search by name, ID, or version..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full border-blue-200 dark:border-gray-700 focus:ring-blue-300 dark:bg-gray-800 dark:text-blue-100"
+              <input
+                type="text"
+                className="border px-3 py-2 rounded w-full mb-4"
+                value={editUrl}
+                onChange={e => setEditUrl(e.target.value)}
               />
-            </CardContent>
-          </Card>
-          {/* Version History Table (Standard first, then Version) */}
-          <Card className={cardStyle + " mb-8"}>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-lg">
-                Version History
-                <Badge variant="secondary" className="ml-2 bg-gradient-to-r from-blue-100 to-teal-100 dark:from-blue-900 dark:to-teal-900 text-blue-700 dark:text-blue-200 border border-blue-200 dark:border-blue-900">
-                  {filteredVersions.length} versions
-                </Badge>
-              </CardTitle>
-              <p className="text-sm text-blue-400 dark:text-blue-300">
-                History of all uploaded versions
-              </p>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b dark:border-gray-700">
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Standard</th>
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Version</th>
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Uploaded By</th>
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Release Date</th>
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Size</th>
-                      <th className="text-left py-3 px-4 font-medium text-blue-600 dark:text-blue-200">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredVersions.map((file, index) => (
-                    <tr key={index} className="border-b dark:border-gray-800 hover:bg-gradient-to-r hover:from-blue-50 hover:to-teal-50 dark:hover:from-blue-900 dark:hover:to-teal-900 transition">
-                      <td className="py-3 px-4 font-medium text-blue-900 dark:text-blue-100">{file.standard}</td>
-                      <td className="py-3 px-4 text-blue-700 dark:text-blue-200">{file.version}</td>
-                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300 italic">{file.uploadedBy}</td>
-                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.releaseDate}</td>
-                      <td className="py-3 px-4 text-blue-400 dark:text-blue-300">{file.size}</td>
-                      <td className="py-3 px-4 flex gap-1">
-                        <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={() => {
-                              handleOpenFile(file.renamed_filename || file.filename || file.name)}}
-                          >
-                            <Eye className="h-4 w-4 text-blue-500" />
-                          </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleDownload(file.renamed_filename || file.filename)}
-                        >
-                          <Download className="h-4 w-4 text-blue-500" />
-                        </Button>
-
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
-        </section>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setEditingId(null)}>
+              Cancel
+            </Button>
+            <Button onClick={saveFrequency}>Save</Button>
+          </div>
+        </Modal>
       </div>
-      <StandardModal open={modalOpen} onClose={() => setModalOpen(false)} detail={modalDetail} />
-        <WordViewerModal
-  open={viewerOpen}
-  onClose={() => setViewerOpen(false)}
-  filename={viewerFilename}
-  downloadUrl={viewerDownloadUrl}
-/>
     </div>
   );
 }
-
