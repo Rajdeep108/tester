@@ -1,71 +1,35 @@
-async def monitor_site():
-    # Get the monitoring URL from CONFIG, not from SQLite!
-    url = read_crawler_config()["crawler_url"]
-    
-    # Use MCP tool instead of local function
-    html = await fetch_url_via_mcp(url)
-    await asyncio.sleep(2)
-    
-    # Use MCP tool for parsing
-    latest_file = os.path.basename(await parse_version_via_mcp(html))
-    
-    if not latest_file:
-        print(f"❌ No .zip files found at {url}")
-        print_and_store(f"❌ No .zip files found at {url}")
-        return
-
-    last_seen = get_latest_file()
-    last_filename = os.path.basename(last_seen["filename"]) if last_seen else None
-    
-    # Use MCP tool for comparison
-    decision = await compare_versions_via_mcp(last_filename or "", latest_file)
-
-    # Store the MONITORING URL (not the file URL) in database
-    add_file(latest_file, url, decision)  # This stores the monitoring URL
+# ---------------------------
+# New API endpoints for standard name and URL
+# ---------------------------
+@router.post("/agent/{id}/standard_name")
+async def set_standard_name(id: int, payload: dict):
+    """Set the standard name in config"""
+    new_standard_name = payload.get("standard_name")
+    write_crawler_config(standard_name=new_standard_name)
     await broadcast_status()
+    return {"success": True, "standard_name": new_standard_name}
 
-    if decision == "new version":
-        print(f"🚀 New file detected: {latest_file}")
-        print_and_store(f"🚀 New file detected: {latest_file}")
-        await asyncio.sleep(15)
+@router.post("/agent/{id}/url")
+async def set_url(id: int, payload: dict):
+    """Set the monitoring URL in config"""
+    new_url = payload.get("url")
+    write_crawler_config(url=new_url)
+    await broadcast_status()
+    return {"success": True, "url": new_url}
 
-        # Construct the file download URL
-        if not url.endswith('/'):
-            url += '/'
-        file_url = url + latest_file  # This is for downloading the file
-
-        # Download and process the file
-        with tempfile.TemporaryDirectory() as temp_dir:
-            zip_path = os.path.join(temp_dir, latest_file)
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(file_url)
-                resp.raise_for_status()
-                async with aiofiles.open(zip_path, 'wb') as f:
-                    await f.write(resp.content)
-            print_and_store(f"Downloaded ZIP to {zip_path}")
-
-
-
-
-
-
-
-
-async def broadcast_status():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
+@router.get("/monitor/config")
+async def get_monitor_config():
+    """Get the complete monitor configuration"""
     cfg = read_crawler_config()
-    data = {
-        "filename": row[0] if row else None,
-        "monitoring_url": cfg["crawler_url"],  # Show monitoring URL from config
-        "status": row[2] if row else None,
-        "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
+    return {
+        "active": cfg["crawler_active"],
+        "frequency": cfg["crawler_frequency"],
+        "url": cfg["crawler_url"],
+        "standard_name": cfg["standard_name"]
     }
-    await manager.broadcast({"type": "status", "data": data})
+
+
+
 
 
 
@@ -85,14 +49,151 @@ async def monitor_status():
     cfg = read_crawler_config()
     return [{
         "filename": row[0] if row else None,
-        "monitoring_url": cfg["crawler_url"],  # Show monitoring URL from config
+        "monitoring_url": cfg["crawler_url"],
         "status": row[2] if row else None,
         "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
+        "frequency": cfg["crawler_frequency"],
+        "standard_name": cfg["standard_name"]  # Add standard name
     }]
 
+async def broadcast_status():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    cfg = read_crawler_config()
+    data = {
+        "filename": row[0] if row else None,
+        "monitoring_url": cfg["crawler_url"],
+        "status": row[2] if row else None,
+        "last_checked": row[3] if row else None,
+        "frequency": cfg["crawler_frequency"],
+        "standard_name": cfg["standard_name"]  # Add standard name
+    }
+    await manager.broadcast({"type": "status", "data": data})
 
 
 
 
 
+
+
+=======================================================================================================
+
+
+
+
+
+
+
+
+
+// In your useEffect that fetches initial data:
+useEffect(() => {
+  // Fetch crawler config (includes standard name and URL)
+  fetch('http://localhost:8000/monitor/config')
+    .then(res => res.json())
+    .then(config => {
+      setCrawlerStatus(s => ({ ...s, active: config.active }));
+      setBackendFrequency(config.frequency);
+      setWorkflows(wfs =>
+        wfs.map(w =>
+          w.type === '3gpp'
+            ? { 
+                ...w, 
+                isActive: config.active,
+                frequency: config.frequency,
+                monitoredStandards: [config.standard_name],
+                url: config.url
+              }
+            : w
+        )
+      );
+    });
+
+  // Fetch latest run/status info
+  fetch('http://localhost:8000/monitor/status')
+    .then(res => res.json())
+    .then(arr => {
+      if (arr.length) {
+        setCrawlerStatus(s => ({
+          ...s,
+          lastRun: arr[0].last_checked,
+          lastStatus: arr[0].status
+        }));
+      }
+    });
+}, []);
+
+// Update the saveFrequency function:
+const saveFrequency = async () => {
+  if (editingId === 1) { // 3GPP agent
+    // Save frequency
+    await fetch(`http://localhost:8000/agent/${editingId}/frequency`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frequency: editFrequency }),
+    });
+    
+    // Save standard name
+    await fetch(`http://localhost:8000/agent/${editingId}/standard_name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ standard_name: editStandardName }),
+    });
+    
+    // Save URL
+    await fetch(`http://localhost:8000/agent/${editingId}/url`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: editUrl }),
+    });
+    
+    // Update local state
+    setBackendFrequency(editFrequency);
+    setWorkflows(ws =>
+      ws.map(w =>
+        w.id === editingId
+          ? {
+              ...w,
+              frequency: editFrequency,
+              monitoredStandards: [editStandardName],
+              url: editUrl
+            }
+          : w
+      )
+    );
+  }
+  setEditingId(null);
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+const workflowsData = [
+  {
+    id: 1,
+    name: '3GPP Standards Monitor',
+    description: 'Automatically detect new 3GPP releases and trigger document mapping workflow',
+    actionStatus: 'New version detected',
+    notifyStakeholder: true,
+    lastRun: '2024-06-28 14:30',
+    frequency: 15,
+    isActive: true,
+    monitoredStandards: [''], // Empty initially
+    type: '3gpp',
+    url: '', // Empty initially
+  },
+];
