@@ -2,25 +2,32 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from contextlib import asynccontextmanager
+import threading
+
+from utils import login
 from agents import monitoring_agent
-
-BASE_URL = "https://www.3gpp.org/ftp/specs/archive/23_series/23.002"
-
+from agents.monitoring_agent import init_db, background_monitor, mcp
+from DocumentUpload import document_uploader
+from agents import ai_assistant
+from agents.ai_assistant import router as ai_assistant_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    monitoring_agent.init_db()
-    asyncio.create_task(monitoring_agent.background_monitor(BASE_URL))
+    init_db()
+    asyncio.create_task(background_monitor())
+    threading.Thread(target=lambda: mcp.run("stdio"), daemon=True).start()
     yield
 
 app = FastAPI(lifespan=lifespan)
-
+app.include_router(ai_assistant_router, prefix="/api")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8081", "http://localhost:8080", "http://localhost:8080/workflows", "*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include monitoring agent routes
+app.include_router(login.router)
 app.include_router(monitoring_agent.router)
+app.include_router(document_uploader.router)
+app.include_router(ai_assistant.router)
