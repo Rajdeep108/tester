@@ -1,43 +1,98 @@
-ERROR:    Traceback (most recent call last):
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\starlette\routing.py", line 694, in lifespan
-    async with self.lifespan_context(app) as maybe_state:
-               ~~~~~~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\fastapi\routing.py", line 134, in merged_lifespan
-    async with original_context(app) as maybe_original_state:
-               ~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\fastapi\routing.py", line 134, in merged_lifespan
-    async with original_context(app) as maybe_original_state:
-               ~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\fastapi\routing.py", line 134, in merged_lifespan
-    async with original_context(app) as maybe_original_state:
-               ~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\fastapi\routing.py", line 134, in merged_lifespan
-    async with original_context(app) as maybe_original_state:
-               ~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-           ^^^^^^^^^^^^^^^^^^^^^
-  File "C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\fastapi\routing.py", line 134, in merged_lifespan
-    async with original_context(app) as maybe_original_state:
-               ~~~~~~~~~~~~~~~~^^^^^
-  File "C:\Users\342534\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 214, in __aenter__
-    return await anext(self.gen)
-                 ~~~~~^^^^^^^^^^
-TypeError: 'coroutine' object is not an async iterator
+async def monitor_site():
+    # Get the monitoring URL from CONFIG, not from SQLite!
+    url = read_crawler_config()["crawler_url"]
+    
+    # Use MCP tool instead of local function
+    html = await fetch_url_via_mcp(url)
+    await asyncio.sleep(2)
+    
+    # Use MCP tool for parsing
+    latest_file = os.path.basename(await parse_version_via_mcp(html))
+    
+    if not latest_file:
+        print(f"❌ No .zip files found at {url}")
+        print_and_store(f"❌ No .zip files found at {url}")
+        return
 
-C:\Users\342534\Desktop\Telecom Standards Management\telecom_venv\Lib\site-packages\uvicorn\lifespan\on.py:91: RuntimeWarning: coroutine 'lifespan' was never awaited
-  return
-RuntimeWarning: Enable tracemalloc to get the object allocation traceback
-ERROR:    Application startup failed. Exiting.
+    last_seen = get_latest_file()
+    last_filename = os.path.basename(last_seen["filename"]) if last_seen else None
+    
+    # Use MCP tool for comparison
+    decision = await compare_versions_via_mcp(last_filename or "", latest_file)
+
+    # Store the MONITORING URL (not the file URL) in database
+    add_file(latest_file, url, decision)  # This stores the monitoring URL
+    await broadcast_status()
+
+    if decision == "new version":
+        print(f"🚀 New file detected: {latest_file}")
+        print_and_store(f"🚀 New file detected: {latest_file}")
+        await asyncio.sleep(15)
+
+        # Construct the file download URL
+        if not url.endswith('/'):
+            url += '/'
+        file_url = url + latest_file  # This is for downloading the file
+
+        # Download and process the file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = os.path.join(temp_dir, latest_file)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(file_url)
+                resp.raise_for_status()
+                async with aiofiles.open(zip_path, 'wb') as f:
+                    await f.write(resp.content)
+            print_and_store(f"Downloaded ZIP to {zip_path}")
+
+
+
+
+
+
+
+
+async def broadcast_status():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    cfg = read_crawler_config()
+    data = {
+        "filename": row[0] if row else None,
+        "monitoring_url": cfg["crawler_url"],  # Show monitoring URL from config
+        "status": row[2] if row else None,
+        "last_checked": row[3] if row else None,
+        "frequency": cfg["crawler_frequency"]
+    }
+    await manager.broadcast({"type": "status", "data": data})
+
+
+
+
+
+
+
+
+
+@router.get("/monitor/status")
+async def monitor_status():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    cfg = read_crawler_config()
+    return [{
+        "filename": row[0] if row else None,
+        "monitoring_url": cfg["crawler_url"],  # Show monitoring URL from config
+        "status": row[2] if row else None,
+        "last_checked": row[3] if row else None,
+        "frequency": cfg["crawler_frequency"]
+    }]
+
+
+
+
+
+
