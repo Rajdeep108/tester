@@ -1,559 +1,217 @@
-import asyncio
 import os
-import httpx
-import sqlite3
-from datetime import datetime
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from mcp.server.fastmcp import FastMCP, Context
-from bs4 import BeautifulSoup  # For parsing HTML page
-from .tools.notifier_tool import send_notification
-import json
-from pathlib import Path
-
-import tempfile
-import shutil
-import zipfile
-from typing import List, Optional
-from docx import Document
-import aiofiles
-
-from pydantic import BaseModel
-
+import re
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 from dotenv import load_dotenv
-from llm.llm_endpoints import chat_completion
-from langsmith.run_helpers import traceable 
-
-
-os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_PROJECT"]="Standards-Monitoring-Agent"
-os.environ["LANGCHAIN_API_KEY"]="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"
-
-
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
-# Websocket manager................
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: set[WebSocket] = set()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_VERSION = os.getenv("OPENAI_VERSION")
+OPENAI_DEPLOYMENT = os.getenv("OPENAI_DEPLOYMENT")
+OPENAI_DEPLOYMENT_ENDPOINT = os.getenv("OPENAI_BASE")
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
+PATH_TO_VECTORSTORE = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\vectorstores"
 
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
+embeddings = AzureOpenAIEmbeddings(
+    api_key=OPENAI_API_KEY,
+    api_version=OPENAI_API_VERSION,
+    azure_deployment="text-embedding-ada-002",
+    azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
+)
 
-    async def broadcast(self, message: dict):
-        for connection in self.active_connections.copy():
-            try:
-                await connection.send_json(message)
-            except Exception:
-                self.disconnect(connection)
+def cosine_score(question, answer, context):
+    # Initialize embedding model
+    emb = AzureOpenAIEmbeddings(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment="text-embedding-ada-002",
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
+    )
+    vecs = emb.embed_documents([question, answer, context])
+    question_vec, answer_vec, context_vec = np.array(vecs[0]), np.array(vecs[1]), np.array(vecs[2])
+    context_sim = cosine_similarity([question_vec], [context_vec])[0][0]
+    answer_sim = cosine_similarity([question_vec], [answer_vec])[0][0]
+    score = (0.7 * context_sim + 0.3 * answer_sim)
+    score = (score + 1) / 2 * 100  # Normalize -1..1 to 0..100
+    return round(min(max(score, 0), 100), 2)
 
-manager = ConnectionManager()
-router = APIRouter()
-mcp = FastMCP("WebsiteMonitor")
-
-DB_PATH = r"C:\Users\342534\Desktop\Telecom Standards Management\backend\telecom_ai.db"
-CONFIG_PATH = Path(r"C:\Users\342534\Desktop\Telecom Standards Management\backend\agents\config\crawler_config.json")
-
-RECIPIENT_EMAILS = [
-    "342534@nttdata.com",
-    "harshitanagaraj.guled@nttdata.com",
-    "neelambuz.singh@nttdata.com"
-]
-
-LATEST_STATUS = ""
-
-def update_latest_status(msg: str):
-    global LATEST_STATUS
-    LATEST_STATUS = msg
-
-# Update print statements to also call this
-def print_and_store(msg: str):
-    update_latest_status(msg)
-    # Broadcast log message to websocket clients
-    try:
-        import asyncio
-        asyncio.create_task(manager.broadcast({"type": "log", "data": msg}))
-    except Exception:
-        pass
-
-async def broadcast_status():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    cfg = read_crawler_config()
-    data = {
-        "filename": row[0] if row else None,
-        "url": row[1] if row else None,
-        "status": row[2] if row else None,
-        "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
-    }
-    await manager.broadcast({"type": "status", "data": data})
-
-# --- Config helpers ---
-def read_crawler_config():
-    if CONFIG_PATH.exists():
-        with open(CONFIG_PATH, "r") as f:
-            data = json.load(f)
-            data.setdefault("crawler_active", False)
-            data.setdefault("crawler_frequency", 10)
-            data.setdefault("crawler_url", "https://www.3gpp.org/ftp/specs/archive/23_series/23.002")
-            return data
-    else:
-        return {
-            "crawler_active": False,
-            "crawler_frequency": 10,
-            "crawler_url": "https://www.3gpp.org/ftp/specs/archive/23_series/23.002"
+def already_ingested(standard_name, standard_version, persist_dir):
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    results = vectordb.get(
+        where={
+            "$and": [
+                {"standard_name": standard_name},
+                {"standard_version": standard_version}
+            ]
         }
-
-crawler_wakeup_event = asyncio.Event()
-def write_crawler_config(active: bool = None, frequency: int = None, url: str = None):
-    cfg = read_crawler_config()
-    orig_active = cfg.get("crawler_active", False)
-    if active is not None:
-        cfg["crawler_active"] = active
-    if frequency is not None:
-        cfg["crawler_frequency"] = frequency
-    if url is not None:
-        cfg["crawler_url"] = url
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f)
-    if active is not None and active != orig_active:
-        try:
-            crawler_wakeup_event.set()
-        except Exception:
-            pass
-
-# ------------------------------------------------------
-# summarizer
-# ------------------------------------------------------
-def extract_all_word_from_zip(zip_path: str, extract_dir: str) -> list[str]:
-    word_paths = []
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        for file in zip_ref.namelist():
-            if file.lower().endswith('.docx') or file.lower().endswith('.doc'):
-                extracted_path = zip_ref.extract(file, extract_dir)
-                word_paths.append(os.path.abspath(extracted_path))
-    return word_paths
-
-import docx2txt
-import doc2txt
-
-def extract_text_from_word(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".docx":
-        try:
-            return docx2txt.process(file_path) or ""
-        except Exception as e:
-            print(f"Error extracting .docx: {e}")
-            return ""
-    elif ext == ".doc":
-        try:
-            return doc2txt.extract_text(file_path) or ""
-        except Exception as e:
-            print(f"Error extracting .doc: {e}")
-            return ""
-    else:
-        return ""
-
-def select_main_word(word_paths: list[str]) -> str | None:
-    max_lines = 0
-    main_word = None
-    for path in word_paths:
-        text = extract_text_from_word(path)
-        lines = [line for line in text.splitlines() if line.strip()]
-        if len(lines) > max_lines:
-            max_lines = len(lines)
-            main_word = path
-    return main_word
-
-import re
-
-def clean_summary_text(text: str) -> str:
-    # Remove leading *, #, -, + from each line
-    lines = text.splitlines()
-    cleaned_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            cleaned_lines.append("")  # preserve blank lines
-            continue
-        # Remove leading markdown bullets/headings
-        cleaned = re.sub(r"^(\*|\-|\+|\#)+\s*", "", stripped)
-        cleaned_lines.append(cleaned)
-    # Remove excessive blank lines
-    result = "\n".join(cleaned_lines)
-    result = re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
-
-def save_summary_to_docx(summary: str, comparison: str, filepath: str, doc_name: str) -> None:
-    doc = Document()
-    doc.add_heading(f"Summary for {doc_name}", 0)
-    doc.add_heading("Overview (1-2 pages):", level=1)
-    doc.add_paragraph(summary)
-    doc.save(filepath)
-
-# ---------------------------
-# Database Helpers
-# ---------------------------
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS files (
-               id INTEGER PRIMARY KEY,
-               filename TEXT UNIQUE,
-               url TEXT,
-               status TEXT,
-               last_checked TEXT
-           )"""
     )
-    conn.commit()
-    conn.close()
+    return len(results['ids']) > 0
 
-def add_file(filename: str, url: str, status: str):
-    current_time = datetime.now().isoformat() 
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        """INSERT INTO files (filename, url, status, last_checked)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(filename) DO UPDATE SET
-               status=excluded.status,
-               last_checked=excluded.last_checked""",
-        (filename, url, status,current_time)
-    )
-    conn.commit()
-    conn.close()
-
-def get_latest_file():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    return {"filename": row[0], "url": row[1], "last_checked": row[2]} if row else None
-# ---------------------------
-# MCP Tools
-# ---------------------------
-
-@traceable
-@mcp.tool()
-async def fetch_url(url: str, ctx: Context) -> str:
-    headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-}
-    async with httpx.AsyncClient(headers=headers) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        return resp.text
-
-@traceable
-@mcp.tool()
-def parse_version(html: str, ctx: Context):
-    """Parse the latest .zip file in the folder page by uploaded date"""
-    soup = BeautifulSoup(html, "html.parser")
-    files = []
-    # Each file entry is a <tr> inside <tbody>
-    for row in soup.select("tbody tr"):
-        cols = row.find_all("td")
-        if len(cols) < 5:
-            continue
-        # The filename link is the third <td> (index 2)
-        a_tag = cols[2].find("a", href=True)
-        if not a_tag or not a_tag["href"].endswith(".zip"):
-            continue
-        filename = os.path.basename(a_tag["href"])
-        # The date is the fourth <td> (index 3)
-        date_str = cols[3].get_text(strip=True)
-        try:
-            # Try parsing date, e.g. '2025/06/03 17:49'
-            date_obj = datetime.strptime(date_str, "%Y/%m/%d %H:%M")
-        except Exception:
-            continue  # skip if date not parsable
-        files.append((filename, date_obj))
-    if not files:
-        return None
-    # Sort files by date (descending)
-    files.sort(key=lambda x: x[1], reverse=True)
-    # Return the filename of the latest file
-    return files[0][0]
-
-@traceable
-@mcp.tool()
-def compare_versions(old: str, new: str, ctx: Context):
-    if old != new:
-        return "new version"
-    return "same version"
-
-# ---------------------------
-# Agent Logic
-# ---------------------------
-
-@traceable(run_type="llm")
-def should_crawl_reasoning_llm(last_checked:str , last_file: str, frequency: int,current_time:str) -> bool:
-    """
-    Lightweight agentic reasoning: Should we crawl now?
-    Uses LLM to decide, answer must start with 'yes' or 'no'.
-    """
-    prompt = (
-        f"You are an autonomous standards monitoring agent for 3GPP. "
-        f"Your goal is to efficiently detect updates to the website: "
-        f"- Last checked: {last_checked}\n"
-        f"Current time: {current_time}\n"
-        f"- Last file seen: {last_file}\n"
-        f"- Check frequency (seconds): {frequency}\n"
-        "You must decide whether to crawl the website NOW. "
-        "Crawling too often may waste resources, but missing updates is worse. "
-        "Consider the following:\n"
-        "- If it has been a long time since last check, crawling is more urgent.\n"
-        "- If the last file has not changed for several checks, occasional crawling is still needed to catch updates.\n"
-        "- If frequency is low but there is an important pattern (e.g., frequent updates), crawling may be justified.\n"
-        "Your decision should balance efficiency and vigilance. "
-        "Reply ONLY with 'yes' or 'no' and a short reason. Never be stuck rejecting every crawl."
-    )
-    resp = chat_completion(
-        user_prompt=prompt,
-        system_instruction=(
-            "Decide if the agent should crawl now. "
-            "Always reply with 'yes' or 'no' and a brief reason. "
-            "STRICTLY check If time since last check(in seconds) >= frequency (in seconds), you must definitely reply 'yes'."
-            "Do NOT reject crawling indefinitely; at least crawl occasionally. "
-
-        ))
-    # Only the yes/no part matters for action!
-    return resp.strip().lower().startswith('yes')
-
-@traceable(run_type="llm")
-async def monitor_site():
-
-    ctx = Context()
-    url = read_crawler_config()["crawler_url"]
-    html = await fetch_url(url, ctx)
-    await asyncio.sleep(2)
-    latest_file = os.path.basename(parse_version(html, ctx))
-    if not latest_file:
-        print(f"❌ No .zip files found at {url}")
-        print_and_store(f"❌ No .zip files found at {url}")
+def ingest_text(raw_text: str, metadata: dict = None, persist_dir: str = PATH_TO_VECTORSTORE):
+    standard_name = metadata.get("standard_name")
+    standard_version = metadata.get("standard_version")
+    if already_ingested(standard_name, standard_version, persist_dir):
+        print(f"❌ Standard '{standard_name}' version '{standard_version}' already ingested. Skipping.")
         return
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_text(raw_text)
+    docs = []
+    for idx, chunk in enumerate(chunks):
+        chunk_metadata = (metadata or {}).copy()
+        chunk_metadata['chunk_id'] = idx
+        docs.append(Document(page_content=chunk, metadata=chunk_metadata))
 
-    last_seen = get_latest_file()
-    last_filename = os.path.basename(last_seen["filename"]) if last_seen else None
-    decision = compare_versions(last_filename or "", latest_file, ctx)
-
-    if not url.endswith('/'):
-        url += '/'
-    file_url = url + latest_file
-    add_file(latest_file, url, decision)
-    await broadcast_status()
-
-    if decision == "new version":
-        print(f"🚀 New file detected: {latest_file}")
-        print_and_store(f"🚀 New file detected: {latest_file}")
-        await asyncio.sleep(15)
-
-        # --- BEGIN NEW LOGIC ---
-        with tempfile.TemporaryDirectory() as temp_dir:
-            zip_path = os.path.join(temp_dir, latest_file)
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(file_url)
-                resp.raise_for_status()
-                async with aiofiles.open(zip_path, 'wb') as f:
-                    await f.write(resp.content)
-            print_and_store(f"Downloaded ZIP to {zip_path}")
-
-            word_paths = extract_all_word_from_zip(zip_path, temp_dir)
-            if not word_paths:
-                print_and_store("No .docx or .doc files found in ZIP.")
-                return
-
-            main_word_path = select_main_word(word_paths)
-            if not main_word_path:
-                print_and_store("Could not determine main Word file.")
-                return
-
-            print_and_store(f"Main Word file selected: {main_word_path}")
-
-            main_text = extract_text_from_word(main_word_path)
-            if not main_text.strip():
-                print_and_store("No extractable text found in Word file.")
-                return
-
-            print_and_store("Generating summary...")
-            await asyncio.sleep(5)
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    vectordb.add_documents(docs)
+    print(f"✅ Ingested {len(docs)} chunks into ChromaDB")
 
 
-            chunk_size = 3000
-            chunks = [main_text[i:i+chunk_size] for i in range(0, len(main_text), chunk_size)]
-            summaries = []
-            for idx, chunk in enumerate(chunks):
-                summary = chat_completion(
-                    user_prompt=f"Summarize the following telecom standard document content (chunk {idx+1}):\n\n{chunk}",
-                    system_instruction="Summarize this technical content for a standards update digest. Focus on key changes, new features, and important scope."
-                )
-                summaries.append(summary)
-            final_summary = "\n\n".join(summaries)
-            print_and_store("Summary generated.")
-            await asyncio.sleep(1.5)
+def build_rag_chain(persist_dir: str = PATH_TO_VECTORSTORE):
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
 
-            summary_docx_path = os.path.join(temp_dir, f"summary_{os.path.splitext(latest_file)[0]}.docx")
-            cleaned_summary = clean_summary_text(final_summary)
-            save_summary_to_docx(cleaned_summary, "", summary_docx_path, os.path.basename(main_word_path))
-            print_and_store(f"Summary DOCX saved: {summary_docx_path}")
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
-            subject = f"New 3GPP File Available: {latest_file}"
-            content = (
-                f"<p>Dear Team,</p>"
-                f"<p>We are pleased to inform you that a new version of the 3GPP standard <b>{latest_file}</b> has been uploaded to the official 3GPP website.</p>"
-                f"<p>Please find a brief summary of the document attached in this email, to help you quickly identify what is new.</p>"
-                f"<p>Best regards,<br>Standards Monitoring Automation</p>"
-            )
+    system_prompt = (
+    "You are a helpful AI assistant specialized in telecom standards (3GPP and related). "
+    "When the user asks about telecom or standards, use the provided context to answer. "
+    "If the answer is not in the context or not related to telecom, respond ONLY with **OUT OF CONTEXT QUESTION** (in bold and uppercase). After that, add a short prompt like: 'Would you like to know anything about telecom standards?' "
+    "If the question is general chit-chat or not related to telecom, answer naturally using your own knowledge.\n\n"
+    "Context: {context}")
+ 
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ])
 
-            print_and_store("Sending Email Notification with summary attached...")
-            for email in RECIPIENT_EMAILS:
-                send_notification(email, subject, content, attachment_path=summary_docx_path)
-            print_and_store("Email Notification sent with summary attached!")
+    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+    return create_retrieval_chain(retriever, combine_docs_chain)
 
-        # All temp files are deleted automatically here
-        # --- END NEW LOGIC ---
+# --- This is the only NEW function you need for your FastAPI router! ---
+def build_rag_chain_and_retriever(persist_dir: str = PATH_TO_VECTORSTORE):
+    """
+    Returns (rag_chain, retriever) tuple for use in FastAPI and elsewhere.
+    """
+    llm = AzureChatOpenAI(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment=OPENAI_DEPLOYMENT,
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+        temperature=0
+    )
 
-    else:
-        print(f"No new file. Current latest: {latest_file}")
-        print_and_store(f"No new file. Current latest: {latest_file}")
+    vectordb = Chroma(
+        collection_name="standards_collection",
+        embedding_function=embeddings,
+        persist_directory=persist_dir,
+    )
+    retriever = vectordb.as_retriever(search_kwargs={"k": 3})
 
+    system_prompt = (
+    "You are a helpful AI assistant specialized in telecom standards (3GPP and related). "
+    "When the user asks about telecom or standards, use the provided context to answer. "
+    "If the answer is not in the context or not related to telecom, respond ONLY with **OUT OF CONTEXT QUESTION** (in bold and uppercase). After that, add a short prompt like: 'Would you like to know anything about telecom standards?' "
+    "If the question is general chit-chat or not related to telecom, answer naturally using your own knowledge.\n\n"
+    "Context: {context}")
 
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", "{input}"),
+    ])
 
-# ---------------------------
-# Background Task
-# ---------------------------
+    combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+    rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
+    return rag_chain, retriever
 
-last_active = None
-async def background_monitor():
-    global last_active
-    while True:
-        cfg = read_crawler_config()
-        freq = cfg["crawler_frequency"]
-        if cfg["crawler_active"]:
-            last = get_latest_file()
-            last_checked = last['last_checked'] if last and last['last_checked'] else "never"
-            last_file = last['filename'] if last else "none"
-            # --- AGENTIC DECISION STEP ---
+def is_out_of_context(question, context, threshold=0.7):
+    emb = AzureOpenAIEmbeddings(
+        api_key=OPENAI_API_KEY,
+        api_version=OPENAI_API_VERSION,
+        azure_deployment="text-embedding-ada-002",
+        azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT
+    )
+   
+    if isinstance(context, list):
+        context = "\n".join([doc.page_content if hasattr(doc, "page_content") else str(doc) for doc in context])
+    vecs = emb.embed_documents([question, context])
+    from sklearn.metrics.pairwise import cosine_similarity
+    sim = cosine_similarity([vecs[0]], [vecs[1]])[0][0]
+    return sim < threshold
 
-            now = datetime.now().isoformat()  # or your preferred format
-            should_crawl = should_crawl_reasoning_llm(
-                last_checked=last_checked,
-                current_time=now,
-                last_file=last_file,
-                frequency=freq
-            )
-            if should_crawl:
-                try:
-                    await monitor_site()
-                except Exception as e:
-                    print(f"❌ Too many requests to website: {e}")
-                    print_and_store(f"Website is loading....")
-            else:
-                print("Agentic Reasoning: Decided not to crawl this cycle.")
-                print_and_store("Agentic Reasoning: Decided not to crawl this cycle.")
-        else:
-            if last_active != False:
-                print("🔌 Crawler is inactive.")
-                print_and_store("🔌 Crawler is inactive.")
-        last_active = cfg["crawler_active"]
+def evaluate_retrieval_accuracy(question, answer, context, llm=None):
+    # 1. If the answer is OUT OF CONTEXT, return 0
+    if isinstance(answer, str) and "OUT OF CONTEXT QUESTION" in answer.upper():
+        print(0)
+        return 0
 
-        try:
-            crawler_wakeup_event.clear()
-            await asyncio.wait_for(crawler_wakeup_event.wait(), timeout=freq)
-            continue
-        except asyncio.TimeoutError:
-            pass
+    # 2. Out-of-context detection based on embeddings
+    if is_out_of_context(question, context, threshold=0.7):
+        print(0)
+        return 0
 
-# ---------------------------
-# FastAPI Endpoints
-# ---------------------------
+    # ... rest of your LLM grading logic ...
+    if llm is None:
+        llm = AzureChatOpenAI(
+            api_key=OPENAI_API_KEY,
+            api_version=OPENAI_API_VERSION,
+            azure_deployment=OPENAI_DEPLOYMENT,
+            azure_endpoint=OPENAI_DEPLOYMENT_ENDPOINT,
+            temperature=0.2
+        )
 
-@router.get("/monitor/agent")
-async def get_agent_status():
-    cfg = read_crawler_config()
-    return {
-        "active": cfg["crawler_active"],
-        "frequency": cfg["crawler_frequency"],
-    }
-
-class AgentToggleRequest(BaseModel):
-    active: bool
-
-@router.post("/monitor/agent/toggle")
-async def toggle_agent(body: AgentToggleRequest):
-    write_crawler_config(active=body.active)
-    # Send a log message to all clients
-    msg = "🔌 Crawler activated." if body.active else "🔌 Crawler deactivated."
-    print_and_store(msg)
-    await broadcast_status()
-    return {"success": True, "active": body.active}
-
-class AgentUrlRequest(BaseModel):
-    url: str
-
-@router.post("/agent/{id}/url")
-async def set_url(id: int, payload: dict):
-    new_url = payload.get("url")
-    write_crawler_config(url=new_url)
-    await broadcast_status()
-    return {"success": True}
-
-
-class AgentFrequencyRequest(BaseModel):
-    frequency: int  # seconds
-
-@router.post("/agent/{id}/frequency")
-async def set_frequency(id: int, payload: dict):
-    new_freq = payload.get("frequency")
-    write_crawler_config(frequency=new_freq)
-    await broadcast_status()
-    return {"success": True}
-
-@router.get("/monitor/status")
-async def monitor_status():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT filename, url, status, last_checked FROM files ORDER BY last_checked DESC LIMIT 1")
-    row = c.fetchone()
-    conn.close()
-    cfg = read_crawler_config()
-    return [{
-        "filename": row[0] if row else None,
-        "url": row[1] if row else None,
-        "status": row[2] if row else None,
-        "last_checked": row[3] if row else None,
-        "frequency": cfg["crawler_frequency"]
-    }]
-
-@router.get("/monitor/log")
-def get_latest_log():
-    return {"message": LATEST_STATUS}
-
-@router.websocket("/ws/monitor")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+    eval_prompt = (
+        "You are an expert evaluator for AI answers to technical questions. "
+        "Given the user's question, the AI's answer, and the supporting context, "
+        "rate the answer's factual accuracy and grounding in the context on a scale from 0 to 100, "
+        "where 100 means perfectly correct and grounded in context, and 0 means completely incorrect or fabricated.\n"
+        "IMPORTANT: Do NOT use only 0, 50, or 100. Use the full range and be granular (e.g., 87, 76, 32, etc.).\n"
+        "If the question is not addressed by the context, or cannot be answered using the context, always respond with 0.\n"
+        "Question: {question}\n"
+        "Answer: {answer}\n"
+        "Context: {context}\n"
+        "Score (0-100):"
+    )
+    if isinstance(context, list):
+        context = "\n".join([doc.page_content if hasattr(doc, "page_content") else str(doc) for doc in context])
+    messages = [
+        {"role": "system", "content": eval_prompt.format(question=question, answer=answer, context=context)}
+    ]
+    resp = llm.invoke(messages)
     try:
-        while True:
-            await websocket.receive_text()  # Optional: keep alive
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        match = re.search(r'\b([0-9]{1,3})\b', resp.content)
+        score = int(match.group(1)) if match else 0
+        score = min(max(score, 0), 100)
+    except Exception:
+        score = 0
 
-# ---------------------------
-# Standalone MCP
-# ---------------------------
+    # Fallback for coarse scores
+    if score in (0, 50, 100):
+        score = cosine_score(question, answer, context)
 
-if __name__ == "__main__":
-    init_db()
-    asyncio.run(background_monitor())
-    # For MCP CLI: mcp.run("stdio")
+    return score
+
