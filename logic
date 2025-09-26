@@ -1,165 +1,374 @@
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
-from agents.utils.rag_pipeline import build_rag_chain_and_retriever, evaluate_retrieval_accuracy
-from utils.functions import (
-    insert_chat_history,
-    get_chat_history,
-    get_recent_sessions,
-    get_top_sessions_latest_messages,
-    insert_agent_metrics,
-    update_user_feedback,
-    update_retrieval_accuracy,
-    get_agent_metrics_averages,
-)
-import time
-import logging
-import traceback
+iAgentOps POC
 
-router = APIRouter()
+POC Plan (with Cluster-Level Metrics)
 
-# Build chain and retriever
-rag_chain, rag_retriever = build_rag_chain_and_retriever()
+Objective
 
-class ChatRequest(BaseModel):
-    question: str
-    session_id: str = None
+Demonstrate end-to-end observability and governance where any agent (cloud or on-prem, editable or non-editable) emits traces, metrics, and logs via:
 
-class ChatResponse(BaseModel):
-    answer: str
-    chat_id: int
+· a lightweight OTel SDK probe (editable agents), or
 
-class ChatHistoryItem(BaseModel):
-    id: int
-    timestamp: str
-    question: str
-    answer: str
+· auto-instrumentation / native OTel (non-editable agents),
 
-class SessionSummary(BaseModel):
-    session_id: str
-    last_time: str
+into a unified OpenTelemetry Collector → Data Stores → Grafana (embedded in React + Django) pipeline. In parallel, capture cluster-level (Kubernetes/infra) metrics to correlate agent performance with platform health. This proves the approach integrates with enterprise agents without forcing re-engineering and supports SRE-grade operations.
 
-class SessionLatestMessage(BaseModel):
-    session_id: str
-    id: int
-    timestamp: str
-    question: str
-    answer: str
+---
 
-class FeedbackRequest(BaseModel):
-    chat_id: int
-    feedback: int  # 1=up, 0=down
+Business Value
 
-class RetrievalAccuracyRequest(BaseModel):
-    chat_id: int
-    accuracy: float  # 0..100
+· Vendor Neutrality → OpenTelemetry-based, portable across on-prem, cloud, Docker, and Kubernetes.
 
-class AgentMetricsResponse(BaseModel):
-    user_satisfaction: float
-    retrieval_accuracy: float
-    latency: float
+· Governance-Ready KPIs → Latency, success rate, cost, error tracking across all agents.
 
-@router.post("/chat/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    t0 = time.perf_counter()
-    fallback_answer = "Sorry, I couldn't process your request. Please try again."
-    try:
-        # --- Fetch last 3 chats for session --- QnA pair... QA1 QA2 QA3
-        history = []
-        if request.session_id:
-            rows = get_chat_history(session_id=request.session_id)
-            # Ensure sorted by timestamp ascending (oldest → newest)
-            rows = sorted(rows, key=lambda x: x["timestamp"])
-            # Take the last 3
-            history = rows[-3:]
+· Flexible Plug-in Model → SDK for editable agents; auto-instrumentation or native OTel for black-box agents.
 
-        # --- Build conversational context ---
-        history_str = ""
-        for row in history:
-            history_str += f"User: {row['question']}\nAssistant: {row['answer']}\n"
-        final_input = history_str + f"User: {request.question}\nAssistant:"
+· Scalable & Operable → Cluster metrics enable capacity planning, SLO tracking, and “noisy neighbor” detection.
 
-        # --- Run RAG ---
-        result = rag_chain.invoke({"input": final_input})
-        answer = result.get("answer", None)
-        if not answer:
-            raise ValueError("RAG pipeline did not return an answer.")
+---
 
-        # --- Retrieval still only on current question ---
-        context_docs = rag_retriever.get_relevant_documents(request.question)
-        context = "\n".join([doc.page_content for doc in context_docs])
-        latency_ms = (time.perf_counter() - t0) * 1000
+POC Scope & Steps
 
-        # --- Save chat + metrics ---
-        chat_id = insert_chat_history(request.question, answer, request.session_id)
-        insert_agent_metrics(chat_id, request.session_id, latency_ms)
+1. Agents (Cloud + On-Prem)
 
-        accuracy = evaluate_retrieval_accuracy(request.question, answer, context)
-        update_retrieval_accuracy(chat_id, accuracy)
+· Register three representative agents:
 
-        return ChatResponse(answer=answer, chat_id=chat_id)
+o Agent A (On-Prem service, editable)
 
-    except Exception as e:
-        logging.error("Exception in /chat/: %s", e)
-        traceback.print_exc()
-        try:
-            latency_ms = (time.perf_counter() - t0) * 1000
-            chat_id = insert_chat_history(request.question, fallback_answer, request.session_id)
-            insert_agent_metrics(chat_id, request.session_id, latency_ms)
-            update_retrieval_accuracy(chat_id, 0)
-        except Exception as db_e:
-            logging.error("Failed to save error chat/metrics: %s", db_e)
-            traceback.print_exc()
-            return ChatResponse(answer=fallback_answer, chat_id=-1)
-        return ChatResponse(answer=fallback_answer, chat_id=chat_id)
+o Agent B (Azure Web App, editable)
+
+o Agent C (On-Prem service, non-editable — used to show baseline vs rich signals)
+
+· Check for native OTel telemetry; reuse it if present.
+
+· Ensure a mix of business, compliance, and risk-focused use cases.
+
+2. Instrumentation SDK / Auto-Instrumentation
+
+· Editable (A & B): Use OTel SDK inside the agent to capture rich, business-level signals.
+
+· Non-editable (C): Use auto-instrumentation and external collection for baseline runtime signals (latency, requests, errors).
+
+· Signals across all paths:
+
+o Traces → Plan → LLM → Tool → Output
+
+o Metrics → latency, success/failure, token usage, cost
+
+o Logs → warnings, errors, retries
+
+3. OpenTelemetry Collector (OTEL)
+
+· Central ingestion service for agents and platform signals.
+
+· Ingest SDK, native OTel, and auto-instrumentation streams.
+
+· Pipelines configured for:
+
+o Traces → Jaeger / Tempo
+
+o Metrics → Prometheus → PostgreSQL (daily rollups)
+
+o Logs → Loki
+
+· Processors add batching, agent_id/env tagging (onprem vs azure), and sensitive-data redaction.
+
+3b. Cluster & Platform Telemetry (Kubernetes/Infra) ← new
+
+· What to collect:
+
+o Node/Pod/Container metrics: CPU, memory, disk I/O, network, restarts, throttling, OOM events.
+
+o Kubernetes state: deployments, pods, replicas, pending/failed states, HPA activity.
+
+o Pipeline health: Collector throughput, queue/backpressure, dropped spans/metrics/logs.
+
+· Why:
+
+o Correlate agent latency/cost/errors with cluster saturation (e.g., CPU throttling, network congestion).
+
+o Support SLOs, capacity planning, and incident triage (is it the agent or the platform?).
+
+· Outcome: Infra metrics flow into the same observability stack and are label-aligned (cluster/namespace/node/pod) with agent metadata for drill-downs.
+
+4. Data Stores
+
+· Prometheus → raw agent and cluster metrics (e.g., agent latency + node CPU).
+
+· PostgreSQL → aggregated rollups (daily cost, success) for fast reads and reporting.
+
+· Loki → logs with search/filter; pivot by trace_id where applicable.
+
+· Jaeger/Tempo → traces for replay and waterfall analysis.
+
+· (All stores run with persistence suitable for multi-run validation.)
+
+5. Visualization (React + Django + Grafana)
+
+· Grafana is the single visualization layer, embedded in React UI (with Django backend).
+
+· Dashboards:
+
+o Per-agent: metrics (latency, cost, success, errors), traces (pipeline stages), logs (linked by trace_id).
+
+o Platform/Cluster: node and pod health, resource saturation, restarts, throttling, HPA behavior, Collector health.
+
+o Executive/KPI: cost and success rollups (PostgreSQL), environment split (on-prem vs Azure).
+
+· Correlation paths:
+
+o Metrics spike (agent) → Trace waterfall → Logs (via trace_id).
+
+o Agent latency spike → Cluster dashboard (check node/pod CPU, throttling, restarts) → Back to agent traces.
+
+· Editable vs Non-editable comparison: Rich traces/metrics (A & B) vs baseline telemetry (C).
+
+6. Deployment & Orchestration
+
+· Components (agents, Collector, data stores, Grafana) hosted on Kubernetes or Docker Compose.
+
+· Namespaces/networking reflect on-prem (A & C) and Azure (B).
+
+· Cluster telemetry captured alongside agent telemetry to validate hybrid portability and operability.
+
+---
+
+Success Criteria
+
+· All three agent signals (traces, metrics, logs) visible end-to-end.
+
+· Cluster/infra metrics visible (nodes, pods, throttling, restarts, Collector health).
+
+· Visualization delivered exclusively through Grafana embedded in React.
+
+· Seamless correlation across metrics ↔ traces ↔ logs, and agent ↔ cluster views.
+
+· Editable and non-editable agents observed together; environment tags (on-prem vs Azure) in all panels.
+
+---
+
+POC Validation Goals
+
+· Unified Telemetry Collection → One Collector pipeline for agents and cluster signals.
+
+· Vendor-Agnostic Design → Backend flexibility (Tempo/Jaeger, Prometheus/Postgres, Loki).
+
+· Rich Observability → AI KPIs (latency, tokens, cost, errors) correlated with platform health (CPU/mem/network, throttling, restarts).
+
+· Operational Readiness → Detect backpressure, dropped telemetry, and saturation; support SLOs/capacity planning.
+
+· Scalability & Flexibility → Multi-language agents, hybrid environments, portable across Docker/K8s.
 
 
-@router.get("/chat-history/", response_model=list[ChatHistoryItem])
-async def chat_history(session_id: str = Query(None)):
-    rows = get_chat_history(session_id=session_id)
-    return [
-        ChatHistoryItem(
-            id=row["id"],
-            timestamp=row["timestamp"],
-            question=row["question"],
-            answer=row["answer"]
-        )
-        for row in rows
-    ]
 
-@router.post("/chat-feedback/")
-async def chat_feedback(request: FeedbackRequest):
-    success = update_user_feedback(request.chat_id, request.feedback)
-    return {"status": "ok" if success else "error"}
 
-@router.post("/chat-accuracy/")
-async def chat_accuracy(request: RetrievalAccuracyRequest):
-    update_retrieval_accuracy(request.chat_id, request.accuracy)
-    return {"status": "ok"}
+Sprint Plan
 
-@router.get("/agent-metrics/", response_model=AgentMetricsResponse)
-async def agent_metrics():
-    metrics = get_agent_metrics_averages()
-    print(f"[DEBUG] /agent-metrics/ response: {metrics}")
-    return metrics
+Sprint 1: Team, Environment & Agent Setup
 
-@router.get("/sessions/", response_model=list[SessionSummary])
-async def sessions():
-    sessions = get_recent_sessions()
-    return [
-        SessionSummary(session_id=s["session_id"], last_time=s["last_time"])
-        for s in sessions
-    ]
+Sept 24 – Oct 3 | Demo: Oct 3
 
-@router.get("/top-sessions-latest/", response_model=list[SessionLatestMessage])
-async def top_sessions_latest():
-    messages = get_top_sessions_latest_messages(limit=4)
-    return [
-        SessionLatestMessage(
-            session_id=m["session_id"],
-            id=m["id"],
-            timestamp=m["timestamp"],
-            question=m["question"],
-            answer=m["answer"],
-        )
-        for m in messages
-    ]
+Focus: Build foundation; register three agents and classify integration paths.
+
+Tasks
+
+· Team setup & planning; roles; collaboration.
+
+· Provision single-server environment using Kubernetes (k3s/minikube) or Docker Compose to emulate on-prem and Azure.
+
+· Configure namespaces/networks to separate environments; validate connectivity.
+
+· Agent inventory & readiness:
+
+o Register Agent A (On-Prem, editable, wired to an on-prem LLM runtime), Agent B (Azure Web App, editable), Agent C (On-Prem, non-editable).
+
+o Editable agents (A & B): modify code → inject OTel SDK → capture rich signals (Plan → On-Prem LLM for Agent A / Azure LLM for Agent B → Tool → Output; token usage, compliance flags, quality scores).
+
+o Non-editable agent (C): no code access → use auto-instrumentation/external collection → baseline telemetry (latency, request counts, errors).
+
+o If native OTel exists for any agent, connect directly to the pipeline.
+
+· Smoke tests: verify all agents respond to basic requests; label by environment (on-prem vs Azure).
+
+Demonstration
+
+· Walkthrough of infra setup (K8s namespaces or Docker networks).
+
+· Show registry with A (on-prem, editable, connected to on-prem LLM), B (Azure, editable), C (on-prem, non-editable).
+
+· Run basic test requests and confirm outputs.
+
+---
+
+Sprint 2: Instrumentation SDK Integration
+
+Oct 6 – Oct 13 | Demo: Oct 13
+
+Focus: Capture telemetry from agents without re-engineering.
+
+Integration paths
+
+· Editable (A & B): Inject OTel SDK → capture rich signals.
+
+· Non-editable (C): Use auto-instrumentation/external collection → baseline signals.
+
+· If native OTel exists → connect to pipeline.
+
+Tasks
+
+· Ensure all agents emit traces, metrics, logs.
+
+· Map spans to pipeline stages: Plan, Data, LLM, Prompt, Tools, Code, Output.
+
+· Agent A: When injecting the OTel SDK, capture on-prem LLM spans with attributes
+
+Demonstration
+
+· Side-by-side dashboards: A & B (rich) vs C (baseline).
+
+· Before/after telemetry comparison.
+
+---
+
+Sprint 3: OpenTelemetry Collector Setup & Cluster Metrics
+
+Oct 14 – Oct 21 | Demo: Oct 21
+
+Focus: Central ingestion pipeline for agents and cluster telemetry.
+
+Tasks
+
+· Deploy OTel Collector in Kubernetes (Deployment/DaemonSet).
+
+· Enable receivers for agent signals (traces, metrics, logs).
+
+· Ingest cluster/infra telemetry:
+
+o Node/Pod/Container metrics (CPU, memory, network, restarts, throttling).
+
+o Kubernetes state (deployments, pods, replicas, failed states, HPA activity).
+
+o Collector health (throughput, dropped spans/logs, queue/backpressure).
+
+o Correlate Agent A latency with node/pod CPU/GPU usage of the on-prem LLM service to prove Private AI workload saturation.
+
+· Apply processors: batching, tagging (agent_id/env), redaction.
+
+· Route telemetry:
+
+o Traces → Jaeger/Tempo
+
+o Metrics → Prometheus
+
+o Logs → Loki
+
+Demonstration
+
+· Show Collector pods running in K8s.
+
+· Validate ingestion from agents and infra.
+
+· Confirm signals visible in Jaeger/Tempo, Prometheus, Loki.
+
+---
+
+Sprint 4: Data Stores & Persistence
+
+Oct 22 – Oct 28 | Demo: Oct 28
+
+Focus: Persistence and aggregation of agent + cluster telemetry.
+
+Tasks
+
+· Operate telemetry stores in K8s with persistence: Prometheus, PostgreSQL, Loki, Tempo/Jaeger.
+
+· Configure daily rollups into PostgreSQL (cost, success).
+
+· Validate retention across multiple runs.
+
+· For Agent A, roll up token counts × proxy cost/unit instead of API billing data.
+
+Demonstration
+
+· Latency trend graphs (Prometheus).
+
+· Daily cost per agent (PostgreSQL).
+
+· Logs filtered by agent_id (Loki).
+
+· Trace replay from Tempo/Jaeger.
+
+---
+
+Sprint 5: Visualization & Correlation
+
+Oct 29 – Nov 5 | Demo: Nov 5
+
+Focus: Unified dashboards for agents and infra in Grafana embedded inside React/Django.
+
+Tasks
+
+· Deploy Grafana in Kubernetes; embed into React UI.
+
+· Connect datasources: Prometheus, PostgreSQL, Loki, Tempo/Jaeger.
+
+· Build dashboards:
+
+o Agent dashboards: metrics (latency, cost, errors), traces (execution waterfall), logs (trace_id-linked).
+
+o Cluster dashboards: node/pod health, resource saturation, restarts, throttling, HPA behavior, Collector health.
+
+o Show on-prem LLM pod health alongside Agent A metrics (CPU throttling, OOM events).
+
+o KPI dashboards: cost and success rollups, split by on-prem vs Azure.
+
+o Split costs → Cloud (Agent B) vs On-Prem (Agent A proxy cost).
+
+· Enable correlation across metrics → traces → logs, and between agent ↔ cluster views.
+
+Demonstration
+
+· Show A & B dashboards (rich spans) vs C (baseline).
+
+· Show cluster dashboard (CPU/memory/restats) alongside agent dashboards.
+
+· Navigate metrics spike → traces → logs → cluster correlation.
+
+---
+
+Sprint 6: End-to-End Validation & Final Demo
+
+Nov 6 – Nov 14 | Demo: Nov 14
+
+Focus: Validate unified telemetry + governance KPIs across agents and infra.
+
+Tasks
+
+· Verify telemetry consistency across A (on-prem editable), B (Azure editable), C (on-prem non-editable).
+
+· Validate cluster metrics (node/pod health, throttling, Collector throughput).
+
+· Confirm env tags (on-prem vs Azure) in dashboards.
+
+· Stress test concurrent runs.
+
+· Document infra, architecture, and demo script.
+
+· Highlight governance KPIs; compare editable vs non-editable telemetry depth.
+
+Demonstration
+
+· Live agent runs with cluster telemetry correlation.
+
+· Unified Grafana dashboards with agent + infra correlation flows.
+
+· Side-by-side telemetry depth comparison (SDK-rich vs auto baseline).
+
+· Roadmap: scale to multi-agent governance with Responsible AI, PromptOps, RAGOps, DevSecOps.
+
+Show that Agent A runs fully on-prem LLM with no outbound calls. Validate via:
+
+· Grafana dashboards
+
+· Network policies blocking external LLM endpoints.
+
+· Cost shown as token+resource proxy instead of API billing.
